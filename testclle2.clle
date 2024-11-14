@@ -1,0 +1,727 @@
+/*********************************************************************/
+/*Version 2.01                                                       */
+/*  DSPO0016 - DSP COM Internal - Client/Server       CHOOKL/020116  */
+/*                                                                   */
+/*  PEP : DSPO0016                                                   */
+/*  MOD : DSPO0016 - CM Agent for TCP/IP (Internal)                  */
+/*        DSPS0003 - proc DSPTIMSTM (srcpgm DSPSSRV01)               */
+/*        DSPS0005 - Load general parameter (srvpgm DSPSSRV01)       */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                   (C) Copyright Silverlake System Sdn. Bhd. 1996. */
+/*********************************************************************/
+/* Pgmr  Trace#  Description                                         */
+/* ----  ------  -----------                                         */
+/*                                                                   */
+/* ChooklX0025   -Change not use QPRINT but write the COM exception  */
+/* 13/06/2002     to a log file                                      */
+/*               -Change all the Char[] to handle '\0' value         */
+/*                                                                   */
+/* ChooklX0052   - Change to use select() to check the status before */
+/* 22/09/2002      send                                              */
+/*                                                                   */
+/* ChooklX0071   - Change to avoid the socket down when the          */
+/* 17/10/2002      connect() function fail                           */
+/*                                                                   */
+/* ChooklX0083   - Change to support difference Queue for            */
+/* 03/01/2003      difference channel                                */
+/*                                                                   */
+/*********************************************************************/
+/* include files needed for sockets and other stuff */
+#include <sys/types.h>
+#include <stdio.h>
+#include <sys/socket>
+#include <netinet/in.h>
+#include <qrcvdtaq.h>
+#include <qsnddtaq.h>
+#include <xxcvt.h>
+#include <recio.h>
+#include <time.h>
+#include <errno.h>
+#include <sys/time.h>   /*X0052*/
+
+/* #define _NODEBUG_    0 */
+#ifndef _NODEBUG_
+#define debug        printf
+#else
+#define debug
+#endif
+
+/* a couple of definitions to make things more readable */
+#define SOCKET_ERROR -1
+#define TRUE         -1
+#define FALSE         0
+
+#define MSGL_REC_LEN       4096
+
+void GenSttc();                                                                /* X0025 */
+void WrtCel();                                                                 /* X0025 */
+
+#pragma mapinc("dsprc", "DSPSKTDS(DSPSKTDSR)", "both", "d", "union", "DSPRC")
+#include "dsprc"
+#pragma mapinc("dsphd", "DSPHDRDS(DSPHDRDSR)", "both", "d", "union", "DSPHD")
+#include "dsphd"
+
+/* DSP message format */
+DSPRC_DSPSKTDSR_both_t  data_map;
+DSPHD_DSPHDRDSR_both_t  dsphdr;
+
+
+char        pgm_name[11]      = "DSPO0002  ";
+char        new_hdr_to_ext[6] = "*SOKI";
+char        temp1[6];
+char        RqstBuff[4097];                                                    /* X0025 */
+
+typedef u_int SOCKET;
+SOCKET sock_listen;                    /* listening socket */
+struct sockaddr_in addr;               /* SOCKADDR structure declaration  */
+typedef struct sockaddr *LPSOCKADDR;
+
+fd_set  exception_set;                /* X0052 set of sockets to be monitored */
+struct timeval wait_time;             /* X0052 wait time structure */
+
+int rtncode, i, nCounter, nBufferLen;
+decimal(5,0) DataLength = 0.0d;
+
+/* input parameters */
+char* wparm;
+
+char  dtqnam[11];                                                              /* X0025 */
+char  dtqlib[11];                                                              /* X0025 */
+char  szinet_addr[16];                                                         /* X0025 */
+char  szconn_port[6];                                                          /* X0025 */
+char  myjobkey[27];           /* job key to read from system command queue */  /* X0025 */
+char  syscmdqn[11];           /* system command queue name */                  /* X0025 */
+char  syscmdql[11];           /* system command queue library */               /* X0025 */
+char  rtncmd[2];              /* return command flag 1=return */               /* X0025 */
+char  xwait[6];               /* message wait time charecter */                /* X0025 */
+decimal(5,0) qwait = 0.0d;    /* message wait time */
+char  xCommand[9];            /* command field  */                             /* X0025 */
+
+int   conn_port;              /* integer version of szconn_port */
+
+extern char QTVAL[31];             /* External socket header  */               /* X0025 */
+char  job_id[11];                                                              /* X0025 */
+
+/* Step Trace */                                                               /* X0025 */
+char   *xSttc;                                                                 /* X0025 */
+char   xTmpSttc[21];                                                           /* X0025 */
+                                                                               /* X0025 */
+char   *xTmpOthif;                                                             /* X0025 */
+char   *xTmpFctnm;                                                             /* X0025 */
+char   xTmpRmip[16];                                                           /* X0025 */
+int    xTmpRmpt;                                                               /* X0025 */
+                                                                               /* X0025 */
+/* COM Exception Variable  */                                                  /* X0025 */
+char   x27Sttc[21];                                                            /* X0025 */
+int    x27Errno;                                                               /* X0025 */
+char   x27Othif[31];                                                           /* X0025 */
+char   x27Fctnm[31];                                                           /* X0025 */
+char   x27Pgm[11];                                                             /* X0025 */
+char   x27Jid[11];                                                             /* X0025 */
+char   x27Lcip[16];                                                            /* X0025 */
+int    x27Lcpt;                                                                /* X0025 */
+char   x27Rmip[16];                                                            /* X0025 */
+int    x27Rmpt;                                                                /* X0025 */
+char   x27Lrec[4097];                                                          /* X0025 */
+
+/********************************************************************/
+/*  Get the current time and return it in a 6,0 decimal field       */
+/********************************************************************/
+decimal(6,0) WhatTimeIsIt()
+{
+   char sznow[7];
+   char* sztime;
+   int     inow;
+   decimal(6,0) dreturn;
+   time_t ltime;
+
+   time(&ltime);
+   sztime = ctime(&ltime);
+   memcpy(sznow, &sztime[11], 2);
+   memcpy(&sznow[2], &sztime[14], 2);
+   memcpy(&sznow[4], &sztime[17], 2);
+   memset(&sznow[6], '\0', 1);
+   inow = atoi(sznow);
+   QXXITOP((unsigned char*)&dreturn, 6, 0, inow);
+   return dreturn;
+}
+
+/********************************************************************/
+/* Receive Information from a data queue -                          */
+/*         Returns TRUE if the recv was successful                  */
+/********************************************************************/
+int ReceiveDataQueueEntry()
+{
+char  dmy[11];            /* dummy variable */                                 /* X0025 */
+decimal(3,0) kln = 26.0d; /* queue key length */
+decimal(3,0) dln = 0.0d;  /* queue sender key length */
+
+   debug("*** Waiting to Receive from data queue***\n");
+   /* clear the receive buffer */
+   memset((void*)&data_map,' ',sizeof(data_map));
+   memset((void*)&dsphdr,' ',sizeof(dsphdr));
+
+   DataLength = 0;
+   while(DataLength == 0)
+   {
+     /* Get command queue first */
+     if(strcmp(syscmdqn, "          ") != 0)
+       QRCVDTAQ(syscmdqn, syscmdql, &DataLength, (void*)&dsphdr, 0, "EQ", kln, myjobkey, dln, dmy);
+     if (DataLength == 0)
+     {
+       /* call the data queue receive function - # chars rcvd in DataLength */
+       /* We will wait the message from the input queue for "qwait" second, */
+       /* if notthing coming to this queue, we will go back to look into    */
+       /* system command queue.                                             */
+       QRCVDTAQ(dtqnam, dtqlib, &DataLength, (void*)&data_map, qwait);
+     }
+     /* Get some command queue */
+     else
+     {
+        data_map.SKTMLEN = 29 + sizeof(dsphdr);
+        memset((void*)&data_map.SKTHEAD[0], '*', 1);
+        memcpy((void*)&data_map.SKTHEAD[1], (void*)&dsphdr.I13HFMID, 4);
+        memset((void*)&data_map.SKTDEVN, ' ', 15);
+        memcpy((void*)&data_map.SKTDEVN, (void*)&dsphdr.I13MSTA, 8);
+        memcpy((void*)&data_map.SKTDATA, &dsphdr, sizeof(dsphdr));
+        memcpy(&rtncmd, (void*)&dsphdr.I13MORE, 1);
+        memset(&rtncmd[1], '\0', 1);
+        memcpy(&xCommand, (void*)&dsphdr.I13MSTA, 8);
+        memset(&xCommand[8], '\0', 1);
+        debug("*** Received system command %s ***\n", xCommand);
+     }
+   }
+   return TRUE;
+
+   /* call the data queue receive function - # chars rcvd in DataLength */
+/* QRCVDTAQ(dtqnam, dtqlib, &DataLength, (void*)&data_map, -1);         */
+/* if(DataLength == 0)                                                  */
+/*     return FALSE;                                                    */
+/* else                                                                 */
+/*     return TRUE;                                                     */
+}
+
+/********************************************************************/
+/* Re-connect to sever rountine (100 time)                          */
+/*   New routine Modify by Aphichat Jamjaeng                        */
+/********************************************************************/
+int ReconnectServer()
+{
+int rtnval = FALSE;
+int trycount = 0;
+int tlength;
+
+   while(!rtnval)
+   {
+      rtnval = TRUE;
+      trycount += 1;
+      debug("*** Try to re-connect server again ***\n");
+
+    /*  Close the OLD sock_listen              */
+      rtncode=close(sock_listen);
+
+      xSttc = "B0";                                                            /* X0025 */
+      GenSttc();                                                               /* X0025 */
+
+      memset(&xTmpRmip, ' ', 15);                                              /* X0025 */
+      memset(&xTmpRmip[15], '\0', 1);                                          /* X0025 */
+      xTmpRmpt = 0;                                                            /* X0025 */
+
+    /*  Startup - Call the socket() function   */
+    /*  Create a stream socket of type AF_INET */
+      errno = 0;
+      sock_listen = socket(AF_INET, SOCK_STREAM, 0);
+      if (sock_listen == SOCKET_ERROR)
+      {
+         debug("Socket function failed.");
+         debug(" Socket() failed with errno %i\n", errno);
+
+         xTmpFctnm = "Socket()                      ";                         /* X0025 */
+         xTmpOthif = "Socket Function Failed        ";                         /* X0025 */
+         WrtCel();                                                             /* X0025 */
+
+         rtnval = FALSE;
+      }
+      if(rtnval)
+      {
+       /* Filling Address Structure */
+         addr.sin_family = AF_INET;
+         addr.sin_port = htons(conn_port);
+         addr.sin_addr.s_addr = inet_addr(szinet_addr);
+
+         memset(&xTmpRmip, ' ', 15);                                           /* X0025 */
+         memcpy(xTmpRmip, szinet_addr, 15);                                    /* X0025 */
+         memset(&xTmpRmip[15], '\0', 1);                                       /* X0025 */
+         xTmpRmpt = conn_port;                                                 /* X0025 */
+
+         xSttc = "B1";                                                         /* X0025 */
+         GenSttc();                                                            /* X0025 */
+
+       /* Re-connect again until it successfully */
+         errno = 0;
+         rtncode = connect(sock_listen, (LPSOCKADDR)&addr, sizeof(addr));
+          debug("Re-connect returned %d\n", rtncode);
+         if(rtncode != 0)
+         {
+
+           debug(" *** Re-connection Failed ***");
+           debug(" Connect() failed with errno %i\n", errno);
+
+           xTmpFctnm = "Connect()                     ";                       /* X0025 */
+           xTmpOthif = "Re-connect Function Failed    ";                       /* X0025 */
+           WrtCel();                                                           /* X0025 */
+
+           rtnval = FALSE;
+         }
+      }
+      if(trycount > 100)
+         break;
+   } /* while(!rtnval) */
+
+   if(rtnval)
+      debug("*** Re-connected successfully ***\n");
+   else
+   {
+      debug("*** Re-connected unsuccessfully ***\n");
+   }
+
+   return rtnval;
+
+}
+/********************************************************************/
+/* Return conmand queue to the requester                            */
+/*   New routine Modify by Aphichat Jamjaeng                        */
+/********************************************************************/
+void DoReturnCommand()
+{
+char  rtnkey[27];            /* return command key  */                         /* X0025 */
+decimal(3,0) kln = 26.0d;    /* Queue keyu length   */
+
+   memcpy((void*)&dsphdr.I13HFMID, "RPYC", 4);
+   memcpy(&rtnkey[0], (void*)&dsphdr.I13SID, 10);
+   memcpy(&rtnkey[10], (void*)&dsphdr.I13USER, 10);
+   memcpy(&rtnkey[20], (void*)&dsphdr.I13TMID, 6);
+   QSNDDTAQ(syscmdqn,syscmdql, sizeof(dsphdr), &dsphdr, kln, rtnkey);
+   memset(&rtnkey[26], '\0', 1);
+   debug("*** Replied system command to %s ***\n",rtnkey);
+}
+
+/*------------------------------------------------------------------*/         /* X0025 */
+/* GenSttc                                                          */         /* X0025 */
+/* Generate Step Trace                                              */         /* X0025 */
+/*------------------------------------------------------------------*/         /* X0025 */
+void GenSttc()                                                                 /* X0025 */
+{                                                                              /* X0025 */
+   memset(&xTmpSttc, ' ', 20);                                                 /* X0025 */
+   memcpy(xTmpSttc, xSttc, 2);                                                 /* X0025 */
+   memcpy(&xTmpSttc[2], x27Sttc, 18);                                          /* X0025 */
+   memset(&xTmpSttc[20], '\0', 1);                                             /* X0025 */
+                                                                               /* X0025 */
+   memset(&x27Sttc, ' ', 20);                                                  /* X0025 */
+   memcpy(x27Sttc, xTmpSttc, 20);                                              /* X0025 */
+   memset(&x27Sttc[20], '\0', 1);                                              /* X0025 */
+                                                                               /* X0025 */
+}                                                                              /* X0025 */
+                                                                               /* X0025 */
+/*------------------------------------------------------------------*/         /* X0025 */
+/* WrtCel                                                           */         /* X0025 */
+/* Write a record to DSPCELPF                                       */         /* X0025 */
+/*------------------------------------------------------------------*/         /* X0025 */
+void WrtCel()                                                                  /* X0025 */
+{                                                                              /* X0025 */
+                                                                               /* X0025 */
+   memset(&x27Othif, ' ', 30);                                                 /* X0025 */
+   memcpy(x27Othif, xTmpOthif, 30);                                            /* X0025 */
+   memset(&x27Othif[30], '\0', 1);                                             /* X0025 */
+                                                                               /* X0025 */
+   memset(&x27Fctnm, ' ', 30);                                                 /* X0025 */
+   memcpy(x27Fctnm, xTmpFctnm, 30);                                            /* X0025 */
+   memset(&x27Fctnm[30], '\0', 1);                                             /* X0025 */
+                                                                               /* X0025 */
+   memset(&x27Lcip, ' ', 15);                                                  /* X0025 */
+   memset(&x27Lcip[15], '\0', 1);                                              /* X0025 */
+                                                                               /* X0025 */
+   x27Lcpt = 0;                                                                /* X0025 */
+                                                                               /* X0025 */
+   memset(&x27Rmip, ' ', 15);                                                  /* X0025 */
+   memcpy(x27Rmip, xTmpRmip, 15);                                              /* X0025 */
+   memset(&x27Rmip[15], '\0', 1);                                              /* X0025 */
+                                                                               /* X0025 */
+   x27Rmpt = xTmpRmpt;                                                         /* X0025 */
+                                                                               /* X0025 */
+   x27Errno = errno;                                                           /* X0025 */
+                                                                               /* X0025 */
+   memset(&x27Lrec, ' ', 4096);                                                /* X0025 */
+   memcpy(x27Lrec, RqstBuff, 4096);                                            /* X0025 */
+   memset(&x27Lrec[4096], '\0', 1);                                            /* X0025 */
+                                                                               /* X0025 */
+   DSPM0043(x27Sttc, &x27Errno, x27Othif, x27Fctnm,                            /* X0025 */
+            x27Pgm, x27Jid, x27Lcip, &x27Lcpt, x27Rmip,                        /* X0025 */
+            &x27Rmpt, x27Lrec);                                                /* X0025 */
+                                                                               /* X0025 */
+}                                                                              /* X0025 */
+                                                                               /* X0025 */
+/****************************/
+/****************************/
+/**** Main Function Call ****/
+/****************************/
+/****************************/
+int main(int argc, char* argv[])
+{
+   wparm = argv[1];
+   memcpy(dtqnam, &wparm[2], 10);
+   memset(&dtqnam[10], '\0', 1);                                               /* X0025 */
+   memcpy(dtqlib, &wparm[12], 10);
+   memset(&dtqlib[10], '\0', 1);                                               /* X0025 */
+  /* memcpy(job_id, &wparm[22], 10);      */     /* X0025 */                   /* X0083 */
+   memcpy(job_id, &wparm[90], 10);                                             /* X0083 */
+   memset(&job_id[10], '\0', 1);                                               /* X0025 */
+   memcpy(szinet_addr, &wparm[40], 15);
+   memset(&szinet_addr[15], '\0', 1);                                          /* X0025 */
+   memcpy(szconn_port, &wparm[55], 5);
+   memset(&szconn_port[5], '\0', 1);                                           /* X0025 */
+   memcpy(myjobkey, &wparm[150], 26);
+   memset(&myjobkey[26], '\0', 1);                                             /* X0025 */
+
+   memcpy(x27Jid, &job_id, 10);                                                /* X0025 */
+   memset(&x27Jid[10], '\0', 1);                                               /* X0025 */
+   memcpy(x27Pgm, &job_id, 10);                                                /* X0025 */
+   memset(&x27Pgm[10], '\0', 1);                                               /* X0025 */
+
+   memset(RqstBuff, ' ', sizeof(RqstBuff));                                    /* X0025 */
+   memset(&RqstBuff[4096], '\0', 1);                                           /* X0025 */
+
+   /* Retrieve system command queue parameter */
+   DSPS0005("SYSCMDQ   ", "*NONE               ");
+   memcpy(syscmdql, &QTVAL[0], 10);
+   memset(&syscmdql[10], '\0', 1);                                             /* X0025 */
+   memcpy(syscmdqn, &QTVAL[10], 10);
+   memset(&syscmdqn[10], '\0', 1);                                             /* X0025 */
+   DSPS0005("WAITMSG   ", "*NONE               ");
+   memcpy(xwait, &QTVAL[0], 5);
+   memset(&xwait[5], '\0', 1);                                                 /* X0025 */
+   qwait = atoi(xwait);
+
+/*X0052 Set the wait time for select function */
+   wait_time.tv_sec = 0;     /*X0052*/
+   wait_time.tv_usec = 0;    /*X0052*/
+
+   debug("dtqlib = %s", dtqlib);
+   debug("dtqnam = %s", dtqnam);
+   debug("port  = %s", szconn_port);
+
+   conn_port = atoi(szconn_port);
+
+   debug("*** Starting Sockets ***\n");
+
+   xSttc = "A0";                                                               /* X0025 */
+   GenSttc();                                                                  /* X0025 */
+
+   memset(&xTmpRmip, ' ', 15);                                                 /* X0025 */
+   memset(&xTmpRmip[15], '\0', 1);                                             /* X0025 */
+   xTmpRmpt = 0;                                                               /* X0025 */
+
+   /*  Startup - Call the socket() function   */
+   /*  Create a stream socket of type AF_INET */
+   errno = 0;
+   sock_listen = socket(AF_INET, SOCK_STREAM, 0);
+   if (sock_listen == SOCKET_ERROR)
+   {
+      debug("Socket function failed.");
+
+      debug(" Socket() failed with errno %i\n", errno);
+
+      xTmpFctnm = "Socket()                      ";                            /* X0025 */
+      xTmpOthif = "Socket Function Failed        ";                            /* X0025 */
+      WrtCel();                                                                /* X0025 */
+
+      return 0;
+   }
+
+   debug("*** Filling Address Structure ***\n");
+   addr.sin_family = AF_INET;
+   addr.sin_port = htons(conn_port);
+   addr.sin_addr.s_addr = inet_addr(szinet_addr);
+
+   memset(&xTmpRmip, ' ', 15);                                                 /* X0025 */
+   memcpy(xTmpRmip, szinet_addr, 15);                                          /* X0025 */
+   memset(&xTmpRmip[15], '\0', 1);                                             /* X0025 */
+   xTmpRmpt = conn_port;                                                       /* X0025 */
+
+   xSttc = "A1";                                                               /* X0025 */
+   GenSttc();                                                                  /* X0025 */
+
+   errno = 0;
+   rtncode = connect(sock_listen, (LPSOCKADDR)&addr, sizeof(addr));
+   debug("Connect returned %d\n", rtncode);
+   if(rtncode != 0)
+   {
+      debug("*** Connection Failed ***");
+      debug(" Connect() failed with errno %i\n", errno);
+
+      xTmpFctnm = "Connect()                     ";                            /* X0025 */
+      xTmpOthif = "Connect Function Failed       ";                            /* X0025 */
+      WrtCel();                                                                /* X0025 */
+
+ /*   return 0;                                                     */         /* X0071 */
+   }
+   else
+      debug("*** Connected ***\n");
+
+ /* start a never-ending loop that reads from a data queue and then */
+ /* sends the received information on to the socket                 */
+   while(1)
+   {
+   /* Receive from the data queue */
+      if(ReceiveDataQueueEntry() == FALSE)
+      {
+         debug("*** Receive from data queue failed***\n");
+         break;
+      }
+      else
+      {
+         int tlength = data_map.SKTMLEN ;
+/* 5/13 Get the header type */
+         memcpy(temp1, (void*)&data_map.SKTHEAD,5);
+         memset((void*)&temp1[5], '\0', 1);
+ /* Normal entry from PM */
+         if(strcmp(temp1, "*SOKR") == 0)
+         {
+            memcpy((void*)&data_map.SKTHEAD, new_hdr_to_ext, 5);
+            memset(RqstBuff, ' ', sizeof(RqstBuff));
+ /* Add 4 to the length to copy to RqstBuff to include length of ICLEN */
+            memcpy(RqstBuff, (void*)&data_map, tlength+4);
+            memset(&RqstBuff[4096], '\0', 1);                                  /* X0025 */
+            nBufferLen = tlength + 4;
+            nCounter = 0;
+
+            xSttc = "A2";                                                      /* X0025 */
+            GenSttc();                                                         /* X0025 */
+
+            /* send in a loop to make sure that it's all sent */
+            while(nCounter < tlength+ 4)
+            {
+/*X0052 - Setup the select function */
+               FD_ZERO((void*)&exception_set);                                           /*X0052*/
+               FD_SET(sock_listen, &exception_set);                                      /*X0052*/
+               errno = 0;                                                                /*X0052*/
+               rtncode = select(2, NULL, NULL, &exception_set, &wait_time);              /*X0052*/
+               if (rtncode == SOCKET_ERROR)                                              /*X0052*/
+               {                                                                         /*X0052*/
+                  debug("Select function failed, rtncode = %d.\n", rtncode);             /*X0052*/
+                  debug("Select failed with error %i\n", errno);                         /*X0052*/
+                  xTmpFctnm = "Select()                      ";                          /*X0052*/
+                  xTmpOthif = "Select Function Failed        ";                          /*X0052*/
+                  WrtCel();                                                              /*X0052*/
+               }                                                                         /*X0052*/
+               else                                                                      /*X0052*/
+               {                                                                         /*X0052*/
+                  debug("Select function successful\n");                                 /*X0052*/
+                  if(FD_ISSET(sock_listen, &exception_set))                              /*X0052*/
+                  {                                                                      /*X0052*/
+                    debug("Cannot write 1\n");                                           /*X0052*/
+                    xTmpFctnm = "Select(exception_set)         ";                        /*X0052*/
+                    xTmpOthif = "Socket Exception Exist        ";                        /*X0052*/
+                    WrtCel();                                                            /*X0052*/
+                    close(sock_listen);                                                  /*X0052*/
+                    if (!ReconnectServer())                                              /*X0052*/
+                        return 0;                                                        /*X0052*/
+                    debug("Can write 1 after connection\n");                             /*X0052*/
+                  }                                                                      /*X0052*/
+                  else                                                                   /*X0052*/
+                    debug("Can write 1\n");                                              /*X0052*/
+               }                                                                         /*X0052*/
+
+               xSttc = "A3";                                                             /*X0052*/
+               GenSttc();                                                                /*X0052*/
+
+              errno = 0;
+              rtncode = send(sock_listen, &RqstBuff[nCounter], nBufferLen, 0);
+              if(rtncode == SOCKET_ERROR)
+              {
+                 debug("*** Send Failed ***");
+                 debug(" Send() failed with errno %i\n", errno);
+
+                 xTmpFctnm = "Send()                        ";                 /* X0025 */
+                 xTmpOthif = "Send Function Failed          ";                 /* X0025 */
+                 WrtCel();                                                     /* X0025 */
+
+              /* break;  */
+                 if (!ReconnectServer())
+                    return 0;
+              }
+
+
+              nCounter += rtncode;
+              nBufferLen -= rtncode;
+            }
+
+         }
+ /* System command  */
+         else if(strcmp(temp1, "*SYSC") == 0)
+         {
+            memset(RqstBuff, ' ', sizeof(RqstBuff));
+/* Add 4 to the length to copy to RqstBuff to include length of ICLEN */
+            memcpy(RqstBuff, (void*)&data_map, tlength+4);
+            memset(&RqstBuff[4096], '\0', 1);                                  /* X0025 */
+
+        /*  xSttc = "A3";                                       X0052*/        /* X0025 */
+            xSttc = "A4";                                            /*X0052*/ /* X0025 */
+            GenSttc();                                                         /* X0025 */
+
+            nBufferLen = tlength + 4;
+            nCounter = 0;
+            /* send in a loop to make sure that it's all sent */
+            while(nCounter < tlength+ 4)
+            {
+/*X0052 - Setup the select function */
+               FD_ZERO((void*)&exception_set);                                           /*X0052*/
+               FD_SET(sock_listen, &exception_set);                                      /*X0052*/
+               errno = 0;                                                                /*X0052*/
+               rtncode = select(2, NULL, NULL, &exception_set, &wait_time);              /*X0052*/
+               if (rtncode == SOCKET_ERROR)                                              /*X0052*/
+               {                                                                         /*X0052*/
+                  debug("Select function failed, rtncode = %d.\n", rtncode);             /*X0052*/
+                  debug("Select failed with error %i\n", errno);                         /*X0052*/
+                  xTmpFctnm = "Select()                      ";                          /*X0052*/
+                  xTmpOthif = "Select Function Failed        ";                          /*X0052*/
+                  WrtCel();                                                              /*X0052*/
+               }                                                                         /*X0052*/
+               else                                                                      /*X0052*/
+               {                                                                         /*X0052*/
+                  debug("Select function successful\n");                                 /*X0052*/
+                  if(FD_ISSET(sock_listen, &exception_set))                              /*X0052*/
+                  {                                                                      /*X0052*/
+                    debug("Cannot write 1\n");                                           /*X0052*/
+                    xTmpFctnm = "Select(exception_set)         ";                        /*X0052*/
+                    xTmpOthif = "Socket Exception Exist        ";                        /*X0052*/
+                    WrtCel();                                                            /*X0052*/
+                    close(sock_listen);                                                  /*X0052*/
+                    if (!ReconnectServer())                                              /*X0052*/
+                        return 0;                                                        /*X0052*/
+                    debug("Can write 1 after connection\n");                             /*X0052*/
+                  }                                                                      /*X0052*/
+                  else                                                                   /*X0052*/
+                    debug("Can write 1\n");                                              /*X0052*/
+               }                                                                         /*X0052*/
+
+               xSttc = "A5";                                                             /*X0052*/
+               GenSttc();                                                                /*X0052*/
+
+               errno = 0;
+               rtncode = send(sock_listen, &RqstBuff[nCounter], nBufferLen, 0);
+               if(rtncode == SOCKET_ERROR)
+               {
+                  debug("*** System command send Failed ***");
+                  debug(" Send() failed with errno %i\n", errno);
+
+                  xTmpFctnm = "Send()                        ";                /* X0025 */
+                  xTmpOthif = "System Command Send Failed    ";                /* X0025 */
+                  WrtCel();                                                    /* X0025 */
+
+                  if (!ReconnectServer())
+                     return 0;
+               }
+	              nCounter += rtncode;
+	              nBufferLen -= rtncode;
+            }
+            /* Do we need to reply the system command */
+            if(strcmp(rtncmd, "1") == 0)
+               DoReturnCommand();
+            /* Program will be ended if receive command *DOWN */
+            if(strcmp(xCommand, "*DOWN   ") == 0)
+               break;
+         }
+ /* Shutdown request */
+         else if(strcmp(temp1, "*DOWN") == 0)
+         {
+
+            memset(RqstBuff, ' ', sizeof(RqstBuff));
+/* Add 4 to the length to copy to RqstBuff to include length of ICLEN */
+            memcpy(RqstBuff, (void*)&data_map, tlength+4);
+            memset(&RqstBuff[4096], '\0', 1);                                  /* X0025 */
+
+        /*  xSttc = "A4";                                       X0052*/        /* X0025 */
+            xSttc = "A6";                                                                /*X0052*/
+            GenSttc();                                                         /* X0025 */
+
+            nBufferLen = tlength + 4;
+            nCounter = 0;
+            /* send in a loop to make sure that it's all sent */
+            while(nCounter < tlength+ 4)
+            {
+/*X0052 - Setup the select function */
+               FD_ZERO((void*)&exception_set);                                           /*X0052*/
+               FD_SET(sock_listen, &exception_set);                                      /*X0052*/
+               errno = 0;                                                                /*X0052*/
+               rtncode = select(2, NULL, NULL, &exception_set, &wait_time);              /*X0052*/
+               if (rtncode == SOCKET_ERROR)                                              /*X0052*/
+               {                                                                         /*X0052*/
+                  debug("Select function failed, rtncode = %d.\n", rtncode);             /*X0052*/
+                  debug("Select failed with error %i\n", errno);                         /*X0052*/
+                  xTmpFctnm = "Select()                      ";                          /*X0052*/
+                  xTmpOthif = "Select Function Failed        ";                          /*X0052*/
+                  WrtCel();                                                              /*X0052*/
+               }                                                                         /*X0052*/
+               else                                                                      /*X0052*/
+               {                                                                         /*X0052*/
+                  debug("Select function successful\n");                                 /*X0052*/
+                  if(FD_ISSET(sock_listen, &exception_set))                              /*X0052*/
+                  {                                                                      /*X0052*/
+                    debug("Cannot write 1\n");                                           /*X0052*/
+                    xTmpFctnm = "Select(exception_set)         ";                        /*X0052*/
+                    xTmpOthif = "Socket Exception Exist        ";                        /*X0052*/
+                    WrtCel();                                                            /*X0052*/
+                    close(sock_listen);                                                  /*X0052*/
+                    if (!ReconnectServer())                                              /*X0052*/
+                        return 0;                                                        /*X0052*/
+                    debug("Can write 1 after connection\n");                             /*X0052*/
+                  }                                                                      /*X0052*/
+                  else                                                                   /*X0052*/
+                    debug("Can write 1\n");                                              /*X0052*/
+               }                                                                         /*X0052*/
+
+               xSttc = "A7";                                                             /*X0052*/
+               GenSttc();                                                                /*X0052*/
+
+               errno = 0;
+               rtncode = send(sock_listen, &RqstBuff[nCounter], nBufferLen, 0);
+               if(rtncode == SOCKET_ERROR)
+               {
+                  debug("*** Shutdown Send Failed ***");
+                  debug(" Send() failed with errno %i\n", errno);
+
+                  xTmpFctnm = "Send()                        ";                /* X0025 */
+                  xTmpOthif = "Shutdown Send Failed          ";                /* X0025 */
+                  WrtCel();                                                    /* X0025 */
+
+                  if (!ReconnectServer())
+                     return 0;
+               }
+
+
+	              nCounter += rtncode;
+	              nBufferLen -= rtncode;
+            }
+
+             break;
+         }
+      }
+   }  /* end of while 1 */
+
+
+   debug("*** Closing Socket ***\n");
+   /* close down the listen socket */
+   rtncode=close(sock_listen);
+   debug("*** All Done! ***\n");
+   return 0;
+}

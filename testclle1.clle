@@ -1,0 +1,1659 @@
+/*********************************************************************/
+/*                                                                   */
+/*  DSPO0015 - DSP COM External - Client/Server       CHOOKL/160102  */
+/*                                                                   */
+/*  PEP : DSPO0015                                                   */
+/*  MOD : DSPO0015 - COM External - Client/Server                    */
+/*        DSPS0002 - Search route name                               */
+/*        DSPS0005 - Load general parameter                          */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                                                                   */
+/*                   (C) Copyright Silverlake System Sdn. Bhd. 1996. */
+/*********************************************************************/
+/* Pgmr  Trace#  Description                                         */
+/* ----  ------  -----------                                         */
+/* Andy  A0029   Changes to capture IP address of clients by using   */
+/* 05/10/2000    API and not relying on application.                 */
+/* Andy  A0031   Enhance communication program to allow multiple     */
+/* 26/03/2001    socket handler.                                     */
+/* Andy  A0041   Changes to reclaimed lost connections in socket     */
+/* 04/07/2001    programs.                                           */
+/* ChooklC0001   Changes to use new socket header (9 bytes)          */
+/* 13/11/2001                                                        */
+/* Andy  Z0004   Changes to allow multiple connection for Web Server.*/
+/* 23/11/2001    Do not perform reclaiming of socket.                */
+/*                                                                   */
+/* ChooklX0010   Change to handle for Not Complete Message           */
+/* 23/11/2001    (the message only contain Length & Data Contain)    */
+/*               and include convertion from ASCII to EBCDIC         */
+/*                                                                   */
+/* ChooklX0015   change when received 0 byte, don't print a message  */
+/* 19/02/2002    in QPRINT                                           */
+/*                                                                   */
+/* ChooklX0025   -Change not use QPRINT but write the COM exception  */
+/* 13/06/2002     to a log file                                      */
+/*               -Change all the Char[] to handle '\0' value         */
+/*                                                                   */
+/* ChooklX0030   - change to don't send message out to internal      */
+/* 11/07/2002      socket program when tcp/ip down.                  */
+/*                                                                   */
+/* ChooklX0052   - Change to use select() to check the status before */
+/* 22/09/2002      send                                              */
+/*                                                                   */
+/* ChooklX0071   - Change to avoid the socket down when the          */
+/* 17/10/2002      connect() function fail                           */
+/*                                                                   */
+/* ChooklX0083   - Change to support difference Queue for            */
+/* 03/01/2003      difference channel                                */
+/*                                                                   */
+/* ChooklX0103   - Change to support fix local IP and                */
+/* 17/07/2003      port when act as a client                         */
+/*                                                                   */
+/*********************************************************************/
+#include <stdlib.h>
+#include <stdio.h>
+#include <time.h>
+#include <recio.h>
+#include <xxcvt.h>
+#include <netinet/in.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <qsnddtaq.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <arpa/inet.h>      /*A0029*/
+#include <pointer.h>        /*A0029*/
+#include <QSYSINC/MIH/WAITTIME>
+#include <sys/time.h>   /*X0052*/
+
+/* #define _NODEBUG_    0  */
+#ifndef _NODEBUG_
+#define debug        printf
+#else
+#define debug
+#endif
+
+#define SOCKET_ERROR -1
+#define TRUE         -1
+#define FALSE         0
+#define DELAY_TIME    3
+#define UINT_MAX      100
+#define RETRY_MAX     UINT_MAX
+#define SUCCESS       1                                                        /* X0103 */
+#define FAIL          0                                                        /* X0103 */
+
+/*A0029 Declare prototype */
+void CloseSocket(int i);
+void GenSttc();                                                                /* X0025 */
+void WrtCel();                                                                 /* X0025 */
+
+/* Entry parameters */
+char*   wparm;
+
+char    trace_sts[2];          /* trace status */                              /* X0025 */
+char    job_id[11];            /* job id */                                    /* X0025 */
+char    jobgrp[2];             /* job group */                                 /* X0083 */
+char    job_seq[4];            /* job sequence */                              /* X0025 */
+char    server_addr[16];       /* server address */                            /* X0025 */
+char    server_port[6];        /* server port */                               /* X0025 */
+char    xlocal_addr[16];       /* Local address */                             /* X0025 */
+char    szlisten_port[6];      /* port to listen on */                         /* X0025 */
+char    dtqnam[11];            /* internal data queue nam */                   /* X0025 */
+char    dtqlib[11];            /* internal data queue lib */                  /* X0025 */
+char    loc_clt_ip[16];        /* local client IP */                          /* X0103 */
+char    loc_clt_prt[6];        /* local client Port */                        /* X0103 */
+char    loc_clt_fix[2];        /* local client fix */                         /* X0103 */
+
+char    sd_queue[11];          /* send queue name */                           /* X0025 */
+char    sd_lib[11];            /* send queue library */                        /* X0025 */
+
+char    from_int[6] = "*SOKI"; /* from client */                               /* X0025 */
+char    from_ext[31];          /* from server */                               /* X0025 */
+
+char    Comp_Msg[2];              /* X0010 - Flag in DSPJBCPF to indicate complete message */
+char    Cvrt_Msg[2];              /* X0010 - Flag in DSPJBCPF to indicate convertion of message */
+
+char    szResult[4097];  /* X0010 */                                           /* X0025 */
+char    szTemp[4097];    /* X0010 */
+
+char    sMsgHdr[6];                                                            /* X0025 */
+
+#pragma mapinc("dsprc", "DSPSKTDS(DSPSKTDSR)", "both", "d", "union", "DSPRC")
+#include "dsprc"
+#pragma mapinc("dsphd", "DSPHDRDS(DSPHDRDSR)", "both", "d", "union", "DSPHD")
+#include "dsphd"
+
+/* DSP message format */
+DSPRC_DSPSKTDSR_both_t  data_map;
+DSPHD_DSPHDRDSR_both_t  dsphdr;
+
+typedef u_int SOCKET;
+typedef struct sockaddr* LPSOCKADDR;
+SOCKET  socket_list[FD_SETSIZE];  /* list of all sockets connected */
+SOCKET  sock_listen;              /* listening socket */
+SOCKET  sock_server;              /* listening socket */
+SOCKET  sock_accept;              /* accepting socket */
+SOCKET  sock_dest;                /* destination socket */
+struct  sockaddr_in addr;         /* sockaddr structure declaration */
+struct  sockaddr_in loc_clt_addr; /* sockaddr structure declaration */         /* X0103 */
+struct  hostent *host;
+
+fd_set  read_set;                 /* set of sockets to be monitored */
+
+fd_set  exception_set;                /* X0052 set of sockets to be monitored */
+struct timeval wait_time;             /* X0052 wait time structure */
+
+/*C0001 Socket Header External*/
+struct  MsgNComp_Ext
+{
+ short   MSGLEN;
+ char    MSGDETAIL[4095];                                                      /* X0025 */
+};
+struct  MsgNComp_Ext  data_map1;
+short   Len_Ext;
+/*C0001 */
+
+/*A0029 Create IP address structure */
+struct  ClientIPAdr
+{
+ char    IPAddr[16];                                                           /* X0025 */
+ int     PortNo;
+ short   Logon;
+ short   PwdVfy;
+ SOCKET  SesNo;
+};
+
+struct  ClientIPAdr sClientArr[FD_SETSIZE];       /*A0029 - Clients IP address */
+
+int     i;
+int     rtncode;
+int     sleepcnt;
+int     nCounter;
+int     nBufferLen;
+int     nMsgLen;                  /* length of transaction */
+int     nbr_connected = 1;        /* nbr of connected sockets which */
+                                  /* also includes the listening */
+                                  /* socket residing at index 0 */
+int     bCloseall = 0;            /* flag set to shut down server */
+int     listen_port;              /* integer version of szlisten_port */
+char    xCommand[9];              /* System command */                         /* X0025 */
+short   Extern_conn = 0;          /* X0010 - Flag for not complete message */
+
+char    sRqstBuff[4097];           /* Request Buffer */                        /* X0025 */
+char    sSendBuff[4097];           /* Send Buffer */                           /* X0025 */
+
+extern char QRNAMI[11];            /* Route name for routing */                /* X0025 */
+extern char QRLIBI[11];            /* Route library for routing */             /* X0025 */
+extern char QFOUND[2];             /* Found route name */                      /* X0025 */
+extern char QTVAL[31];             /* External socket header  */               /* X0025 */
+
+char     CheckIP[2];               /* External socket header  */               /* X0025 */
+char     CommId[11];               /*A0031*/                                   /* X0025 */
+
+/* Step Trace */                                                               /* X0025 */
+char   *xSttc;                                                                 /* X0025 */
+char   xTmpSttc[21];                                                           /* X0025 */
+                                                                               /* X0025 */
+char   *xTmpOthif;                                                             /* X0025 */
+char   *xTmpFctnm;                                                             /* X0025 */
+char   xTmpLcip[16];                                                           /* X0025 */
+int    xTmpLcpt;                                                               /* X0025 */
+char   xTmpRmip[16];                                                           /* X0025 */
+int    xTmpRmpt;                                                               /* X0025 */
+                                                                               /* X0025 */
+/* COM Exception Variable  */                                                  /* X0025 */
+char   x27Sttc[21];                                                            /* X0025 */
+int    x27Errno;                                                               /* X0025 */
+char   x27Othif[31];                                                           /* X0025 */
+char   x27Fctnm[31];                                                           /* X0025 */
+char   x27Pgm[11];                                                             /* X0025 */
+char   x27Jid[11];                                                             /* X0025 */
+char   x27Lcip[16];                                                            /* X0025 */
+int    x27Lcpt;                                                                /* X0025 */
+char   x27Rmip[16];                                                            /* X0025 */
+int    x27Rmpt;                                                                /* X0025 */
+char   x27Lrec[4097];                                                          /* X0025 */
+
+/*-------------------------------------------------------------------*/
+/* AcceptNewConnection()                                             */
+/* Called when a client wants to Connect, that is when the listening */
+/* socket appears in the read set from the select call.              */
+/*-------------------------------------------------------------------*/
+/* void AcceptNewConnection(void)  */
+int AcceptNewConnection(void)
+{
+struct  sockaddr_in clientaddr;   /* A0029 sockaddr structure declaration used for clients*/
+int     *sClientIPLen;            /*A0029*/
+int     sTmpSize4IP;              /*A0029*/
+
+   xSttc = "B0";                                                               /* X0025 */
+   GenSttc();                                                                  /* X0025 */
+
+   debug("--- Accepting new connection ---\n");
+/* A0029   sock_accept = accept(sock_listen, NULL, NULL); */
+/* sClientIPLen = (void*)&sTmpSize4IP; */                           /*A0029*/  /* X0025 */
+   sTmpSize4IP = sizeof(sClientArr[i].IPAddr);                                 /* X0025 */
+   sClientIPLen = (void*)&sTmpSize4IP;                                         /* X0025 */
+   sock_accept = accept(sock_listen,(struct sockaddr*)&clientaddr, sClientIPLen); /*A0029*/
+   if (sock_accept == SOCKET_ERROR)
+   {
+       debug("Accept function failed, sock_accept = %d.\n", sock_accept);
+       debug(".Accept failed with error %i\n", errno);
+
+       memset(&xTmpRmip, ' ', 15);
+       memset(&xTmpRmip[15], '\0', 1);
+       xTmpRmpt = 0;
+       xTmpFctnm = "AcceptNewConnection()         ";                           /* X0025 */
+       xTmpOthif = "Accept Function Failed        ";                           /* X0025 */
+       WrtCel();                                                               /* X0025 */
+
+       /* If errno = EUNATCH (3448)- Protocol required not available */
+       if (errno == EUNATCH)
+          return FALSE;
+   }
+   else
+   {
+      /* Accept function was successful. Add sock_accept desciptor
+         to the socket_list array and increment 1 to nbr_connected */
+      /* APHI:check if reach max FD_SETSIZE, not allow to connect */
+      if (nbr_connected < FD_SETSIZE)
+      {
+         char   *sTmpadr;        /*A0029*/
+         char   TmpIP[16];       /*A0029*/                                     /* X0025 */
+         char   ValidIP[2];      /*A0029*/
+         int    TmpCLPort;       /*A0029*/
+         int    CurConnection;   /*A0029*/
+         int    j;               /*A0041*/
+         char   WebIP[16];       /*Z0004*/                                     /* X0025 */
+
+         sTmpadr = inet_ntoa(clientaddr.sin_addr);               /*A0029*/
+         memset(&TmpIP, ' ', 15);                                /*A0029*/
+         memcpy(TmpIP, sTmpadr, 15);                             /*A0029*/
+         memset(&TmpIP[15], '\0', 1);                                          /* X0025 */
+         TmpCLPort = clientaddr.sin_port;                        /*A0029*/
+         DSPM0005(CommId, TmpIP, &TmpCLPort, &listen_port, &nbr_connected, "1", ValidIP); /*A0029*/
+         memset(&ValidIP[1], '\0', 1);                           /*A0029*/
+
+/* Z0004 - Bypass reclaiming IP address if the IP belongs to web     */
+         DSPM0042(TmpIP, WebIP);                                 /*Z0004*/
+         memset(&WebIP[1], '\0', 1);                             /*Z0004*/
+
+/* Z0004 - Check only if non-web connections                            */
+         if(strcmp(WebIP, "Y") != 0)                             /*Z0004*/
+       {                                                         /*Z0004*/
+/* A0041 - Check the array for current IP thats' connection was lost */
+         memset(&TmpIP[15], '\0', 1);                            /*A0041*/
+         for(j=1;j<nbr_connected;j++)                            /*A0041*/
+         {
+          char TstIP[16];                                        /*A0041*/     /* X0025 */
+
+          memset(&TstIP, ' ', 15);                               /*A0041*/
+          memcpy(TstIP, sClientArr[j].IPAddr, 15);               /*A0041*/
+          memset(&TstIP[15], '\0', 1);                           /*A0041*/
+          if(strcmp(TmpIP, TstIP) == 0)
+          {
+           CloseSocket(j);                                       /*A0041*/
+          }
+         }
+       }                                                         /*Z0004*/
+
+         memcpy(sClientArr[nbr_connected].IPAddr, sTmpadr, 15);  /*A0029*/
+         sClientArr[nbr_connected].PortNo = clientaddr.sin_port; /*A0029*/
+         if(nbr_connected == 1)                                  /*A0029*/
+              sClientArr[nbr_connected].Logon = 1;               /*A0029*/
+         socket_list[nbr_connected] = sock_accept;
+         sClientArr[nbr_connected].SesNo = sock_accept;          /*A0029*/
+         CurConnection = nbr_connected;                          /*A0029*/
+         nbr_connected++;
+/*A0029 - If invalid connection, close the port */
+         if(strcmp(ValidIP, "Y")!= 0)    /*A0029*/
+         {                               /*A0029*/
+/*         CloseSocket(CurConnection);     A0029*/
+           sClientArr[CurConnection].Logon = 0;  /*A0029*/
+         }                               /*A0029*/
+         else                            /*A0029*/
+         {                               /*A0029*/
+           sClientArr[CurConnection].Logon = 1;  /*A0029*/
+         }                               /*A0029*/
+         sClientArr[CurConnection].PwdVfy = 0;   /*A0029*/
+      }
+      else
+      {
+         close(sock_accept);
+         debug("--- Maximum FD_SETSIZE %d --\n", FD_SETSIZE);
+         debug("--- Socket %d was closed ---\n", sock_accept);
+      }
+   }
+      return TRUE;
+}
+
+/*------------------------------------------------------------------*/
+/* ReceiveAMessage()                                                */
+/* Receive a message from a socket into sRqstBuff                   */
+/* Called when a socket other than the listen socket was returned   */
+/* in the read_set from the select function.                        */
+/*------------------------------------------------------------------*/
+/*A0029 int ReceiveAMessage(SOCKET rcv_socket) */
+int ReceiveAMessage(SOCKET rcv_socket, int i)       /*A0029*/
+{
+   int rtncode;
+   short n1st;                     /* X0010 1st received length */
+   short nISO;                     /* X0010 ISO fixed length */
+
+   xSttc = "C0";                                                               /* X0025 */
+   GenSttc();                                                                  /* X0025 */
+
+   memset(&xTmpLcip, ' ', 15);                                                 /* X0025 */
+   memcpy(xTmpLcip, xlocal_addr, 15);                                          /* X0025 */
+   memset(&xTmpLcip[15], '\0', 1);                                             /* X0025 */
+   xTmpLcpt = atoi(szlisten_port);                                             /* X0025 */
+   memset(&xTmpRmip, ' ', 15);                                                 /* X0025 */
+   memcpy(xTmpRmip, sClientArr[i].IPAddr, 15);                                 /* X0025 */
+   memset(&xTmpRmip[15], '\0', 1);                                             /* X0025 */
+   xTmpRmpt = sClientArr[i].PortNo;                                            /* X0025 */
+
+   debug("--- Waiting to receive from %d---\n", rcv_socket);
+   /* Clear the receive buffer */
+   memset(sRqstBuff, ' ', sizeof(sRqstBuff));
+
+   /* Call the recv function - retrieving 9 characters */
+   errno = 0;                                                    /*A0031*/
+   rtncode = recv(rcv_socket, (char *)sRqstBuff, 1, 0);
+   /* if rtncode is -1, error occurred */
+   if (rtncode == SOCKET_ERROR)
+   {
+      debug("Receive function failed on message header.\n");
+      debug(".Recv failed with error %i\n", errno);              /*A0031*/
+
+      xTmpFctnm = "Recv()                        ";                            /* X0025 */
+      xTmpOthif = "Received Message Failed       ";                            /* X0025 */
+      WrtCel();                                                                /* X0025 */
+
+      return FALSE;
+   }
+   /* No data, another error */
+   else if(rtncode == 0)
+   {
+
+      xSttc = "C1";                                                            /* X0025 */
+      GenSttc();                                                               /* X0025 */
+
+   /*  debug("Error on receive. Data length zero (%d).\n", rtncode);   X0015 */
+
+      xTmpFctnm = "Recv()                        ";                            /* X0025 */
+      xTmpOthif = "Received Data Lenght = Zero   ";                            /* X0025 */
+      WrtCel();                                                                /* X0025 */
+
+       return FALSE;
+   }
+
+   xSttc = "C2";                                                               /* X0025 */
+   GenSttc();                                                                  /* X0025 */
+
+   sleepcnt = 0;
+   nCounter = 0;
+   nBufferLen = 8;
+   while(nCounter < 8)
+   {
+   errno = 0;
+   rtncode = recv(rcv_socket, &sRqstBuff[1], 8, 0);
+   /* if rtncode is -1, but there is non-blocking error(EWOULDBLOCK=3406) present  */
+   if (rtncode == SOCKET_ERROR && errno == EWOULDBLOCK && sleepcnt < 10)
+   {
+      sleepcnt += 1;
+      debug("Try to receive %d times\n", sleepcnt);
+
+      xTmpFctnm = "Recv()                        ";                            /* X0025 */
+      xTmpOthif = "Try to receive until 10 times ";                            /* X0025 */
+      WrtCel();                                                                /* X0025 */
+
+      sleep(1);
+   }
+   else
+   {
+     xSttc = "C3";                                                             /* X0025 */
+     GenSttc();                                                                /* X0025 */
+
+     /* if rtncode is -1, error occurred */
+     if (rtncode == SOCKET_ERROR)
+     {
+        debug("Receive function failed on message header.\n");
+        debug(".Recv failed with error %i\n", errno);              /*A0031*/
+
+        xTmpFctnm = "Recv()                        ";                          /* X0025 */
+        xTmpOthif = "Received Message Failed       ";                          /* X0025 */
+        WrtCel();                                                              /* X0025 */
+
+        return FALSE;
+     }
+     /* No data, another error */
+     else if(rtncode == 0)
+     {
+
+        xSttc = "C4";                                                          /* X0025 */
+        GenSttc();                                                             /* X0025 */
+
+    /*  debug("Error on receive. Data length zero (%d).\n", rtncode);   X0015 */
+
+        xTmpFctnm = "Recv()                        ";                          /* X0025 */
+        xTmpOthif = "Received Data Lengtht = Zero  ";                          /* X0025 */
+        WrtCel();                                                              /* X0025 */
+
+        return FALSE;
+     }
+     else
+     {
+        debug("%d bytes have been received.\n", rtncode);
+        nCounter += rtncode;
+        nBufferLen -= rtncode;
+       }
+     }
+   }
+
+/*A0029 Check to see if need to validate client connection */
+   if(sClientArr[i].Logon == 0)      /*A0029*/
+   {                                 /*A0029*/
+     char     ValidIP[2];            /*A0029*/
+
+     /*A0029*/
+     DSPM0005(CommId, sClientArr[i].IPAddr, &sClientArr[i].PortNo, &listen_port, &i, "1", &ValidIP);
+     memset(&ValidIP[1], '\0', 1);   /*A0029*/
+     if(strcmp(ValidIP, "Y") == 0)   /*A0029*/
+     {                               /*A0029*/
+       sClientArr[i].Logon = 1;      /*A0029*/
+     }                               /*A0029*/
+   }                                 /*A0029*/
+
+   /*X0010 Check source of transaction */                                         /* X0010 */
+
+   xSttc = "C5";                                                               /* X0025 */
+   GenSttc();                                                                  /* X0025 */
+
+   /* Copying header from positions 5-9 */
+   memcpy(sMsgHdr, &sRqstBuff[4], 5);
+   memset(&sMsgHdr[5], '\0', 1);                                               /* X0025 */
+   if((strncmp(sMsgHdr, from_int, 5) == 0) || (strncmp(sMsgHdr, "*SYSC", 5) == 0))   /* X0010 */
+   {                                                                                 /* X0010 */
+     Extern_conn = 2;                /* Indicate this is not a External message */   /* X0010 */
+   debug("Received a message of type %s.\n", sMsgHdr);
+   }                                                                                 /* X0010 */
+   else                                                                              /* X0010 */
+   {                                                                                 /* X0010 */
+     if(strcmp(Comp_Msg, "N") == 0)                                                  /* X0010 */
+     {                                                                               /* X0010 */
+       Extern_conn = 1;              /* Indicate this is not a complete External message */ /*X0010*/
+     }                                                                               /* X0010 */
+     else                                                                            /* X0010 */
+     {                                                                               /* X0010 */
+       Extern_conn = 0;              /* Indicate this is complete External message */       /*X0010*/
+       debug("Received a message of type %s.\n", sMsgHdr);
+     }                                                                               /* X0010 */
+   }                                                                                 /* X0010 */
+
+   /* if valid message header, get the length to receive */
+   if( (instr(from_ext,sMsgHdr,30,5)  >= 0) || (strncmp(sMsgHdr, from_int, 5) == 0)
+       ||  (strcmp(sMsgHdr, "*SYSC") == 0) || (Extern_conn == 1))                 /* X0010 */
+   {
+
+      if(Extern_conn == 1)                                                        /* X0010 */
+      {                                                                           /* X0010 */
+      short sISOLen;                                                              /* X0010 */
+      char  sTmpBuff[8];                                   /* X0010 */         /* X0025 */
+
+      /* Put first 2 digits into the data map so we can treat it
+         as an integer.                                          */
+      memcpy(&sISOLen, sRqstBuff, 2);                                             /* X0010 */
+      debug("Expecting for %d bytes of message data from ISO.\n", sISOLen);       /* X0010 */
+
+      /* Set proper array position */
+      nMsgLen = sISOLen + 213 + 33 - 4;          /* count the total msg length */ /* X0010 */
+      memcpy(sTmpBuff, &sRqstBuff[2], 7);                                         /* X0010 */
+      memset(&sTmpBuff[8], '\0', 1);                                           /* X0025 */
+      memmove(&sRqstBuff[246], sTmpBuff, 7);  /* move the first received msg to the correct position */
+                                              /* full DSP msg */               /* X0010 */
+      memcpy(sRqstBuff, &nMsgLen, 4);         /* total msg length */           /* X0010 */
+
+      /* call the recv function - retrieving message */
+      n1st = 7;               /* Length of msg been received */                   /* X0010 */
+      nCounter = 237 + n1st;  /* Length of Socket header + DSP header */          /* X0010 */
+      sleepcnt = 0;                                                               /* X0010 */
+      nMsgLen = sISOLen ;     /* Length of data contain need to be received */    /* X0010 */
+      nBufferLen = nMsgLen - n1st;     /* Length not yet been received */         /* X0010 */
+      nISO = 237 + n1st;                                                          /* X0010 */
+      }                                                                           /* X0010 */
+      else                                                                        /* X0010 */
+      {                                                                           /* X0010 */
+      /* Put first 4 digits into the data map so we can treat it
+         as an integer.                                          */
+      memcpy(&nMsgLen, sRqstBuff, 4);
+      debug("Expecting for %d bytes of message data.\n", nMsgLen);
+
+      /* call the recv function - retrieving message */
+      n1st = 5;                                                                   /* X0010 */
+      sleepcnt = 0;
+      nCounter = 0;
+      nBufferLen = nMsgLen - n1st;                                                /* X0010 */
+      nISO = 0;                                                                   /* X0010 */
+      }                                                                           /* X0010 */
+
+      /* loop to make sure we receive it all */
+      while(nCounter - nISO < nMsgLen - n1st)                                     /* X0010 */
+      {
+         errno = 0;
+         rtncode = recv(rcv_socket, &sRqstBuff[nCounter + 9],  nBufferLen, 0);
+         /* if rtncode is -1, but there is non-blocking error(EWOULDBLOCK=3406) present  */
+         if (rtncode == SOCKET_ERROR && errno == EWOULDBLOCK && sleepcnt < 10)
+         {
+            sleepcnt += 1;
+            debug("Try to receive %d times\n", sleepcnt);
+
+            xTmpFctnm = "Recv()                        ";                      /* X0025 */
+            xTmpOthif = "Try to receive until 10 times ";                      /* X0025 */
+            WrtCel();                                                          /* X0025 */
+
+            sleep(1);
+         }
+         else
+         {
+            xSttc = "C6";                                                      /* X0025 */
+            GenSttc();                                                         /* X0025 */
+
+            /* if rtncode is -1, error occurred */
+            if (rtncode == SOCKET_ERROR)
+            {
+               debug("Receive function failed on message data.\n");
+               debug(".Recv failed with error %i\n", errno);              /*A0031*/
+
+               xTmpFctnm = "Recv()                        ";                   /* X0025 */
+               xTmpOthif = "Received Message Failed       ";                   /* X0025 */
+               WrtCel();                                                       /* X0025 */
+
+               return FALSE;
+            }
+            /* if rtncode = 0, no data was waiting to be sent, another error */
+            else if(rtncode == 0)
+            {
+               xSttc = "C7";                                                   /* X0025 */
+               GenSttc();                                                      /* X0025 */
+
+           /*  debug("Error on receive. Data length zero (%d).\n", rtncode);   X0015 */
+               debug(".Recv failed with error %i\n", errno);              /*A0031*/
+
+               xTmpFctnm = "Recv()                        ";                   /* X0025 */
+               xTmpOthif = "Received Data Length = Zero   ";                   /* X0025 */
+               WrtCel();                                                       /* X0025 */
+
+               return FALSE;
+            }
+            else
+            {
+               debug("%d bytes have been received.\n", rtncode);
+               nCounter += rtncode;
+               nBufferLen -= rtncode;
+            }
+         }
+      }
+      /* if we get here, the recv was successful */
+      if(Extern_conn == 1)                                                        /* X0010 */
+      {                                                                           /* X0010 */
+      debug("Received %d bytes of message data.\n", nCounter + n1st);             /* X0010 */
+      }                                                                           /* X0010 */
+      else                                                                        /* X0010 */
+      {                                                                           /* X0010 */
+      debug("Received %d bytes of message data.\n", nCounter + 5);
+      nMsgLen += 4;
+      }                                                                           /* X0010 */
+      return TRUE;
+   }
+   else if( strcmp(sMsgHdr, "*DOWN") == 0 )
+   {
+      return TRUE;
+   }
+   else
+   /* Invalid transaction header */
+   {
+      xSttc = "C8";                                                            /* X0025 */
+      GenSttc();                                                               /* X0025 */
+
+      debug("%s is an invalid message header.\n", sMsgHdr);
+
+      xTmpFctnm = "ReceiveAMessage()             ";                            /* X0025 */
+      xTmpOthif = "Invalid Message Header        ";                            /* X0025 */
+      WrtCel();                                                                /* X0025 */
+
+      return FALSE;
+   }
+}
+
+/*------------------------------------------------------------------*/
+/* CloseSocket()                                                    */
+/* Close an individual socket - called from several places          */
+/*------------------------------------------------------------------*/
+void CloseSocket(int i)
+{
+   int j;
+   char ValidIP[2];       /*A0029*/
+
+/*A0029*/
+   DSPM0005(CommId, sClientArr[i].IPAddr, &sClientArr[i].PortNo, &listen_port, &i, "2", &ValidIP);
+   memset(&ValidIP[1], '\0', 1);   /*A0029*/
+   /* this does the actual close */
+   close(socket_list[i]);
+   debug("--- Socket %d was closed ---\n", socket_list[i]);
+
+   /* this removes the closed socket from our array so we won't
+      monitor it anymore                                        */
+   for(j = i; j < nbr_connected; j++)
+   {
+      socket_list[j]	= socket_list[j+1];
+      sClientArr[j]= sClientArr[j+1];
+   }
+   /* decrement the number connected */
+   nbr_connected--;
+}
+
+/*------------------------------------------------------------------*/
+/* CloseAllConnectedSockets()                                       */
+/* Closes all sockets connected at the moment.                      */
+/* Called at program shutdown.                                      */
+/*------------------------------------------------------------------*/
+void CloseAllConnectedSockets(void)
+{
+   /* must go backwards to keep array ok */
+   int i;
+   for(i = nbr_connected - 1; i > 0; i--)
+   {
+      CloseSocket(i);
+   }
+}
+
+/*------------------------------------------------------------------*/
+/* SearchRoute()                                                    */
+/* Search router name for routing input message.                    */
+/*------------------------------------------------------------------*/
+void SearchRoute(void)
+{
+
+   /* Retrieve DSP header for DSPS0002 to search route */
+
+   memset(&dsphdr, ' ', sizeof(dsphdr));
+   memcpy((void*)&dsphdr.I13SID, sMsgHdr, 5);
+   /* call RPG service program to search route name */
+   /* DSPS0002("0", job_id, &dsphdr); */                                       /* X0083 */
+   DSPS0002("0", job_id, &dsphdr, jobgrp);                                     /* X0083 */
+
+   memset(&QFOUND[1], '\0', 1);
+}
+
+/*------------------------------------------------------------------*/
+/* instr()                                                          */
+/* find position tt in ss                                           */
+/* s_ee is size of ee     , s_tt  is size of tt                     */
+/*------------------------------------------------------------------*/
+int  instr(char* ee ,char* tt, int s_ee , int s_tt)
+{
+char    aa[101] = "";                                                          /* X0025 */
+char   wrk[101] = "";                                                          /* X0025 */
+char    bb[101] = "";                                                          /* X0025 */
+  int i,ret ,dif ;
+   memcpy(aa, &ee[0], s_ee);
+   memset(&aa[100], '\0', 1);                                                  /* X0025 */
+   memcpy(bb, &tt[0], s_tt);
+   memset(&bb[100], '\0', 1);                                                  /* X0025 */
+  i = 0    ;
+  dif = s_ee - s_tt ;
+  if ( dif <  0 )  { return -1 ;}
+      while(i  < dif )
+      {
+          memcpy(wrk,&ee[i], s_tt) ;
+          ret = strncmp(wrk,bb ,s_tt );
+          if ( ret == 0  )
+          {
+             break;
+          }
+          i = i + 1 ;
+      }
+      if ( ret == 0 )  { return i;}
+      else { return -1 ; }
+
+}
+/*------------------------------------------------------------------*/
+/* DoSendTrace                                                      */
+/* send message to trance log                                       */
+/*------------------------------------------------------------------*/
+void DoSendTrace()
+{
+char  trace_data[4097];           /* trace date  */                            /* X0025 */
+char  sys_timstm[27];             /* system timestamp  */                      /* X0025 */
+int   tpos;
+   memset(&dsphdr, '0', sizeof(dsphdr));
+   memcpy(&trace_data[0], &dsphdr, sizeof(dsphdr));
+   tpos = sizeof(dsphdr);
+   memcpy(&trace_data[tpos], &job_id, 10);
+   tpos += 10;
+   memcpy(&trace_data[tpos], &job_seq, 3);
+   tpos += 3;
+   memcpy(&trace_data[tpos], &QRLIBI, 10);
+   tpos += 10;
+   memcpy(&trace_data[tpos], &QRNAMI, 10);
+   tpos += 10;
+   DSPTIMSTM(sys_timstm);
+   memcpy(&trace_data[tpos], &sys_timstm, 26);
+   tpos += 26;
+   memcpy(&trace_data[tpos], &data_map, 2048);
+   QSNDDTAQ("DSPSYSTRCQ", "*LIBL     ", sizeof(trace_data), &trace_data);
+}
+/*------------------------------------------------------------------*/
+/* DoLoadtable                                                      */
+/* Load table                                                       */
+/*------------------------------------------------------------------*/
+void DoLoadTable()
+{
+char    sTableName[11];                                                        /* X0025 */
+char    sParName[11];                                                          /* X0025 */
+char    sParItm[21];                                                           /* X0025 */
+
+   /* Get table name from I13FMID */
+   memcpy(sTableName, &data_map.SKTDATA[18], 10);
+   memset(&sTableName[10], '\0', 1);                                           /* X0025 */
+   if(strcmp(sTableName, "DSPRTEPF  ")  == 0)
+   {
+      /* call RPG service program to initial RTE table */
+      /* DSPS0002("1", job_id, " ");  */                                       /* X0083 */
+      DSPS0002("1", job_id, " ", jobgrp);                                      /* X0083 */
+   }
+   else if(strcmp(sTableName, "DSPPARPF  ")  == 0)
+   {
+      /* At this moment we have SOCKETHEAD loading only */
+      /* call RPG service program to load external header value */
+      /* by send "SOCKETHEAD" & job_id */
+      /* Get Par name from I13SUPV */
+      memcpy(sParName, &data_map.SKTDATA[181], 10);
+      memset(&sParName[10], '\0', 1);
+      /* Get Par item from I13UDTA */
+      memcpy(sParItm, &data_map.SKTDATA[193], 20);
+      memset(&sParItm[20], '\0', 1);                                           /* X0025 */
+      DSPS0005(sParName, sParItm);
+      if(strcmp(sParName, "SOCKETHEAD")  == 0)
+      {                                                                        /* X0025 */
+         memcpy(from_ext, QTVAL, 30);
+         memset(&from_ext[30], '\0', 1);                                       /* X0025 */
+      }                                                                        /* X0025 */
+   }
+}
+
+/*------------------------------------------------------------------*/
+/* TruncSpace                                                       */
+/* Truncate Space                                                   */
+/*------------------------------------------------------------------*/
+int TruncSpace(char *szString)
+{
+ char *temp;
+
+ temp = szString;
+ while ((*temp) != '\0')
+ {
+    *temp = (*temp == ' ') ? '\0' : *(++temp);
+ }
+ return;
+}
+/*------------------------------------------------------------------*/
+/* ConnectServer                                                    */
+/* Connect Server                                                   */
+/*------------------------------------------------------------------*/
+int ConnectServer(uint nTryCnt)
+{
+ int nRtnCd;
+
+ xSttc = "D0";                                                                 /* X0025 */
+ GenSttc();                                                                    /* X0025 */
+
+ if (strcmp(loc_clt_fix, "Y") == 0)                                            /* X0103 */
+ {                                                                             /* X0103 */
+    rtncode = bind(sock_server, (struct sockaddr*)&loc_clt_addr,
+                  sizeof(struct sockaddr));                                    /* X0103 */
+                                                                               /* X0103 */
+    if (rtncode == SOCKET_ERROR)                                               /* X0103 */
+    {                                                                          /* X0103 */
+       debug("Bind function failed, rtncode = %d.\n", rtncode);                /* X0103 */
+       debug(".Bind failed with error %i\n", errno);                           /* X0103 */
+       close(sock_server);                                                     /* X0103 */
+                                                                               /* X0103 */
+       xTmpFctnm = "Bind()                        ";                           /* X0103 */
+       xTmpOthif = "Bind Function Failed          ";                           /* X0103 */
+       WrtCel();                                                               /* X0103 */
+                                                                               /* X0103 */
+       return -1;                                                              /* X0103 */
+    }                                                                          /* X0103 */
+ }                                                                             /* X0103 */
+
+ nRtnCd = connect(sock_server, (LPSOCKADDR)&addr, sizeof(addr));
+ if(nRtnCd == SOCKET_ERROR)
+ {
+    xTmpFctnm = "Connect()                     ";                              /* X0025 */
+    xTmpOthif = "Connect Server Failed         ";                              /* X0025 */
+    WrtCel();                                                                  /* X0025 */
+
+    return (nRtnCd);
+ }
+ else
+ {
+    if (nRtnCd = fcntl(sock_server, F_SETFL, O_NONBLOCK) != -1)
+    {
+       socket_list[nbr_connected] = sock_server;
+       nbr_connected++;
+       debug("Connected to %d on try %d.\n", sock_server, nTryCnt);
+       return (nRtnCd);
+    }
+ }
+}
+/*------------------------------------------------------------------*/
+/* RetryDelay                                                       */
+/* Delay for Retry connect to server                                */
+/*------------------------------------------------------------------*/
+void RetryDelay(int nInterval)
+{
+ _MI_Time delay_time;
+
+ mitime(&delay_time, 0, 0, nInterval, 0);
+ waittime(&delay_time, _WAIT_NORMAL);
+}
+/*------------------------------------------------------------------*/
+/* ConnectToServer                                                  */
+/* Connect To Server                                                */
+/*------------------------------------------------------------------*/
+int ConnectToServer()
+{
+ uint   nRetryMax;
+ uint   nRetry;
+ int    nRtnCd;
+ int    nConnPort;
+ int    nLocCltPort;
+ struct sockaddr_in LAddr;
+ int    i_opti = 1;                                                            /* X0103 */
+
+ if (strcmp(loc_clt_fix, "Y") == 0)                                            /* X0103 */
+ {                                                                             /* X0103 */
+    memset (&loc_clt_addr, 0x00, sizeof (struct sockaddr_in));                 /* X0103 */
+    loc_clt_addr.sin_family = AF_INET;                                         /* X0103 */
+    nLocCltPort = atoi(loc_clt_prt);
+
+    if (loc_clt_prt[0] != '*')
+       loc_clt_addr.sin_port = htons (nLocCltPort);                            /* X0103 */
+
+    if (loc_clt_ip[0] != '*')
+       loc_clt_addr.sin_addr.s_addr = inet_addr (loc_clt_ip);                  /* X0103 */
+ }                                                                             /* X0103 */
+
+ nRetryMax = 3;
+ debug("--- Connecting to Server ---\n");
+ nConnPort = atoi(server_port);
+
+ xSttc = "E0";                                                                 /* X0025 */
+ GenSttc();                                                                    /* X0025 */
+
+ addr.sin_family = AF_INET;
+ addr.sin_port = htons(nConnPort);
+ addr.sin_addr.s_addr = inet_addr(server_addr);
+
+ nRetry = 0;
+ while (1)
+ {
+    sock_server = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_server == SOCKET_ERROR)
+    {
+       debug("--- Connect Failed ---\n");
+
+       xTmpFctnm = "Socket()                      ";                           /* X0025 */
+       xTmpOthif = "Socket Function Failed        ";                           /* X0025 */
+       WrtCel();                                                               /* X0025 */
+
+       nRtnCd = sock_server;
+       return nRtnCd;
+    }
+    else                                                                       /* X0103 */
+    {                                                                          /* X0103 */
+       if (strcmp(loc_clt_fix, "Y") == 0)                                      /* X0103 */
+       {                                                                       /* X0103 */
+          debug("--- Set Socket Option ---\n");                                /* X0103 */
+          rtncode = setsockopt(sock_server, SOL_SOCKET, SO_REUSEADDR, (char*)&i_opti,
+                          sizeof(i_opti));                                     /* X0103 */
+          if (rtncode == SOCKET_ERROR)                                         /* X0103 */
+          {                                                                    /* X0103 */
+             debug("setsockopt function failed, rtncode = %d.\n", rtncode);    /* X0103 */
+             close(sock_server);                                               /* X0103 */
+                                                                               /* X0103 */
+             xTmpFctnm = "SetSockOpt()                  ";                     /* X0103 */
+             xTmpOthif = "SetSockOpt Function Failed    ";                     /* X0103 */
+             WrtCel();                                                         /* X0103 */
+                                                                               /* X0103 */
+             return -1;                                                        /* X0103 */
+          }                                                                    /* X0103 */
+       }                                                                       /* X0103 */
+    }                                                                          /* X0103 */
+
+    nRetry = (nRetry != UINT_MAX) ? ++nRetry : 1;
+    nRtnCd = ConnectServer(nRetry);
+    if(nRtnCd == SOCKET_ERROR)
+    {
+       if (nRetry != nRetryMax)
+          /* introduce intervals between retries */
+          RetryDelay(DELAY_TIME);
+       else
+       {
+          debug("Failed to connect after %d attempts.\n", nRetry);
+          break;
+       }
+    }
+    else
+       break;
+    close(sock_server);
+ }  /* while */
+
+ if (nRtnCd != SOCKET_ERROR)
+ {                                                                             /* X0103 */
+    debug("--- Connect Successfull ---\n");
+    return (SUCCESS);                                                          /* X0103 */
+ }                                                                             /* X0103 */
+ else
+ {                                                                             /* X0103 */
+    debug("--- Connect Failed ---\n");
+    return (FAIL);                                                             /* X0103 */
+ }                                                                             /* X0103 */
+
+/* return (FALSE); */                                                          /* X0103 */
+}
+/*------------------------------------------------------------------*/         /* X0025 */
+/* GenSttc                                                          */         /* X0025 */
+/* Generate Step Trace                                              */         /* X0025 */
+/*------------------------------------------------------------------*/         /* X0025 */
+void GenSttc()                                                                 /* X0025 */
+{                                                                              /* X0025 */
+   memset(&xTmpSttc, ' ', 20);                                                 /* X0025 */
+   memcpy(xTmpSttc, xSttc, 2);                                                 /* X0025 */
+   memcpy(&xTmpSttc[2], x27Sttc, 18);                                          /* X0025 */
+   memset(&xTmpSttc[20], '\0', 1);                                             /* X0025 */
+                                                                               /* X0025 */
+   memset(&x27Sttc, ' ', 20);                                                  /* X0025 */
+   memcpy(x27Sttc, xTmpSttc, 20);                                              /* X0025 */
+   memset(&x27Sttc[20], '\0', 1);                                              /* X0025 */
+                                                                               /* X0025 */
+}                                                                              /* X0025 */
+                                                                               /* X0025 */
+/*------------------------------------------------------------------*/         /* X0025 */
+/* WrtCel                                                           */         /* X0025 */
+/* Write a record to DSPCELPF                                       */         /* X0025 */
+/*------------------------------------------------------------------*/         /* X0025 */
+void WrtCel()                                                                  /* X0025 */
+{                                                                              /* X0025 */
+                                                                               /* X0025 */
+   memset(&x27Othif, ' ', 30);                                                 /* X0025 */
+   memcpy(x27Othif, xTmpOthif, 30);                                            /* X0025 */
+   memset(&x27Othif[30], '\0', 1);                                             /* X0025 */
+                                                                               /* X0025 */
+   memset(&x27Fctnm, ' ', 30);                                                 /* X0025 */
+   memcpy(x27Fctnm, xTmpFctnm, 30);                                            /* X0025 */
+   memset(&x27Fctnm[30], '\0', 1);                                             /* X0025 */
+                                                                               /* X0025 */
+   memset(&x27Lcip, ' ', 15);                                                  /* X0025 */
+   memcpy(x27Lcip, &xTmpLcip, 15);                                             /* X0025 */
+   memset(&x27Lcip[15], '\0', 1);                                              /* X0025 */
+                                                                               /* X0025 */
+   x27Lcpt = xTmpLcpt;                                                         /* X0025 */
+                                                                               /* X0025 */
+   memset(&x27Rmip, ' ', 15);                                                  /* X0025 */
+   memcpy(x27Rmip, &xTmpRmip, 15);                                             /* X0025 */
+   memset(&x27Rmip[15], '\0', 1);                                              /* X0025 */
+                                                                               /* X0025 */
+   x27Rmpt = xTmpRmpt;                                                         /* X0025 */
+                                                                               /* X0025 */
+   x27Errno = errno;                                                           /* X0025 */
+                                                                               /* X0025 */
+   memset(&x27Lrec, ' ', 4096);                                                /* X0025 */
+   memcpy(x27Lrec, sRqstBuff, 4096);                                           /* X0025 */
+   memset(&x27Lrec[4096], '\0', 1);                                            /* X0025 */
+                                                                               /* X0025 */
+   DSPM0043(x27Sttc, &x27Errno, x27Othif, x27Fctnm,                            /* X0025 */
+            x27Pgm, x27Jid, x27Lcip, &x27Lcpt, x27Rmip,                        /* X0025 */
+            &x27Rmpt, x27Lrec);                                                /* X0025 */
+                                                                               /* X0025 */
+}                                                                              /* X0025 */
+                                                                               /* X0025 */
+/*------------------------------------------------------------------*/
+/* Main Logic                                                       */
+/*------------------------------------------------------------------*/
+int main(int argc, char* argv[])
+{
+   int on = 1;
+   int	max_socket_nbr;
+   char wparm20[21];                                                           /* X0025 */
+
+   wparm  = argv[1];
+   memcpy(trace_sts, &wparm[1], 1);
+   memset(&trace_sts[1], '\0', 1);
+/*A0031   memcpy(job_id, &wparm[22], 10);  */
+   memcpy(job_id, &wparm[60], 10);  /*A0031*/
+   memset(&job_id[10], '\0', 1);                                               /* X0025 */
+   memcpy(job_seq, &wparm[32], 3);
+   memset(&job_seq[3], '\0', 1);                                               /* X0025 */
+   memcpy(xlocal_addr, &wparm[40], 15);                                        /* X0025 */
+   memset(&xlocal_addr[15], '\0', 1);                                          /* X0025 */
+   memcpy(szlisten_port, &wparm[55], 5);
+   memset(&szlisten_port[5], '\0', 1);                                         /* X0025 */
+   memcpy(dtqnam, &wparm[2], 10);
+   memset(&dtqnam[10], '\0', 1);                                               /* X0025 */
+   memcpy(dtqlib, &wparm[12], 10);
+   memset(&dtqlib[10], '\0', 1);                                               /* X0025 */
+   /* memcpy(CommId, &wparm[22], 10); */  /*A0031*/                            /* X0083 */
+   memcpy(CommId, &wparm[90], 10);                                             /* X0083 */
+   memset(&CommId[10], '\0', 1);                                               /* X0025 */
+   memcpy(server_addr, &wparm[70], 15);
+   memset(&server_addr[15], '\0', 1);                                          /* X0025 */
+   memcpy(server_port, &wparm[85], 5);
+   memset(&server_port[5], '\0', 1);                                           /* X0025 */
+
+   memcpy(loc_clt_fix, &wparm[106], 1);                                        /* X0103 */
+   memset(&loc_clt_fix[1], '\0', 1);                                           /* X0103 */
+   memcpy(loc_clt_ip, &wparm[107], 15);                                        /* X0103 */
+   memset(&loc_clt_ip[15], '\0', 1);                                           /* X0103 */
+   memcpy(loc_clt_prt, &wparm[122], 5);                                        /* X0103 */
+   memset(&loc_clt_prt[5], '\0', 1);                                           /* X0103 */
+
+   memcpy(Comp_Msg, &wparm[100], 1);         /* X0010 */
+   memset(&Comp_Msg[1], '\0', 1);            /* X0010 */
+   memcpy(Cvrt_Msg, &wparm[101], 1);         /* X0010 */
+   memset(&Cvrt_Msg[1], '\0', 1);            /* X0010 */
+   memcpy(jobgrp, &wparm[104], 1);                                             /* X0083 */
+   memset(&jobgrp[1], '\0', 1);                                                /* X0083 */
+
+   /* call RPG service program to load external header value */
+   /* by send "SOCKETHEAD" & job_id */
+   memcpy(wparm20, &job_id, 10);
+   memset(&wparm20[10], ' ', 10);
+   memset(&wparm20[20], '\0', 1);                                              /* X0025 */
+   DSPS0005("SOCKETHEAD", wparm20);
+   memcpy(from_ext, QTVAL, 30);
+   memset(&from_ext[30], '\0', 1);                                             /* X0025 */
+
+/*X0052 Set the wait time for select function */
+   wait_time.tv_sec = 0;     /*X0052*/
+   wait_time.tv_usec = 0;    /*X0052*/
+
+   /* call RPG service program to initial RTE table */
+   /* DSPS0002("1", job_id, " ");  */                                          /* X0083 */
+   DSPS0002("1", job_id, " ", jobgrp);                                         /* X0083 */
+
+   memcpy(x27Jid, &job_id, 10);                                                /* X0025 */
+   memset(&x27Jid[10], '\0', 1);                                               /* X0025 */
+   memcpy(x27Pgm, &CommId, 10);                                                /* X0025 */
+   memset(&x27Pgm[10], '\0', 1);                                               /* X0025 */
+
+   debug("port  = %s  jobname = %s \n", szlisten_port,job_id);
+   /* alphanumeric to integer */
+   listen_port = atoi(szlisten_port);
+
+   xSttc = "A0";                                                               /* X0025 */
+   GenSttc();                                                                  /* X0025 */
+
+   memset(&xTmpLcip, ' ', 15);                                                 /* X0025 */
+   memcpy(xTmpLcip, &xlocal_addr, 15);                                         /* X0025 */
+   memset(&xTmpLcip[15], '\0', 1);                                             /* X0025 */
+   xTmpLcpt = atoi(szlisten_port);                                             /* X0025 */
+   memset(&xTmpRmip, ' ', 15);                                                 /* X0025 */
+   memset(&xTmpRmip[15], '\0', 1);                                             /* X0025 */
+   xTmpRmpt = 0;                                                               /* X0025 */
+
+   debug("--- Starting Sockets ---\n");
+   /* socket() creates an endpoint for communications by returning a
+      socket descriptor.
+      add family - AF_INET     - interproc comms in the Internet domain
+      type       - SOCK_STREAM - full duplex stream socket
+      protocol   - IPPROTO_TCP - TCP protocol used(0 is default)        */
+   sock_listen = socket(AF_INET, SOCK_STREAM, 0);
+   if (sock_listen == SOCKET_ERROR)
+   {
+      debug("Socket function failed.\n");
+
+      xTmpFctnm = "Socket()                      ";                            /* X0025 */
+      xTmpOthif = "Socket Function Failed        ";                            /* X0025 */
+      WrtCel();                                                                /* X0025 */
+
+      return -1;
+   }
+   else
+      /* add the listening socket's descriptor to socket_list array */
+      socket_list[0] = sock_listen;	
+
+   xSttc = "A1";                                                               /* X0025 */
+   GenSttc();                                                                  /* X0025 */
+
+   debug("--- Set Socket Option ---\n");
+   rtncode = setsockopt(sock_listen, SOL_SOCKET, SO_REUSEADDR, (char*)&on, sizeof(on));
+   if (rtncode == SOCKET_ERROR)
+   {
+      debug("setsockopt function failed, rtncode = %d.\n", rtncode);
+      close(sock_listen);
+
+      xTmpFctnm = "SetSockOpt()                  ";                            /* X0025 */
+      xTmpOthif = "SetSockOpt Function Failed    ";                            /* X0025 */
+      WrtCel();                                                                /* X0025 */
+
+      return -1;
+   }
+
+   xSttc = "A2";                                                               /* X0025 */
+   GenSttc();                                                                  /* X0025 */
+
+/*  Turn on the non-blocking socket mode */
+   errno = 0;
+   rtncode = fcntl(sock_listen, F_SETFL, O_NONBLOCK);
+   if(rtncode == SOCKET_ERROR)
+   {
+     debug("Non-blocking switching failed.");
+     debug(" Fcntl() failed with errno %i\n", errno);
+
+     xTmpFctnm = "Fcntl()                       ";                             /* X0025 */
+     xTmpOthif = "Non-blocking Switching Failed ";                             /* X0025 */
+     WrtCel();                                                                 /* X0025 */
+
+   }
+
+   xSttc = "A3";                                                               /* X0025 */
+   GenSttc();                                                                  /* X0025 */
+
+   debug("--- Start Binding ---\n");
+   addr.sin_family = AF_INET;
+   addr.sin_port = htons(listen_port);
+   addr.sin_addr.s_addr = htonl(INADDR_ANY); /* or inet_addr("ip addr") */
+   /* bind() associates a local address to a socket.
+      socket_descriptor - the descriptor of the socket that is to be
+                          bound(desciptor of the listening socket)
+      local_address     - a pointer to a buffer of type struct sockaddr
+                          that contains the the local address to which
+                          the socket is to be bound. It is the port no
+                          and the IP address.
+      address_length    - the length of the local address               */
+   errno = 0;
+   rtncode = bind(sock_listen, (struct sockaddr*)&addr, sizeof(struct sockaddr));
+   if (rtncode == SOCKET_ERROR)
+   {
+      debug("Bind function failed, rtncode = %d.\n", rtncode);
+      debug(".Bind failed with error %i\n", errno);              /*A0031*/
+      close(sock_listen);
+
+      xTmpFctnm = "Bind()                        ";                            /* X0025 */
+      xTmpOthif = "Bind Function Failed          ";                            /* X0025 */
+      WrtCel();                                                                /* X0025 */
+
+      return -1;
+   }
+
+   xSttc = "A4";                                                               /* X0025 */
+   GenSttc();                                                                  /* X0025 */
+
+   /* listen() - invites incoming connection requests
+      socket_descriptor - the descriptor of the socket that is to be
+                          prepared to recieve incoming connection
+                          requests.
+      back_log          - the maximum no of connection requests that
+                          can be queued before the system starts
+                          rejecting incoming requests.
+                          SOMAXCONN is defined in <sys/socket.h>     */
+   debug("--- Starting To Listen ---\n");
+   errno = 0;
+   rtncode = listen(sock_listen, SOMAXCONN);
+   if (rtncode == SOCKET_ERROR)
+   {
+      debug("Listen function failed, rtncode = %d.\n", rtncode);
+      debug("Listen failed with error %i\n", errno);              /*A0031*/
+      close(sock_listen);
+
+      xTmpFctnm = "Listen()                      ";                            /* X0025 */
+      xTmpOthif = "Listen Function Failed        ";                            /* X0025 */
+      WrtCel();                                                                /* X0025 */
+
+      return -1;
+   }
+
+   xSttc = "A5";                                                               /* X0025 */
+   GenSttc();                                                                  /* X0025 */
+
+   memset(&xTmpLcip, ' ', 15);                                                 /* X0025 */
+   memcpy(xTmpLcip, &xlocal_addr, 15);                                         /* X0025 */
+   memset(&xTmpLcip[15], '\0', 1);                                             /* X0025 */
+   xTmpLcpt = atoi(szlisten_port);                                             /* X0025 */
+   memset(&xTmpRmip, ' ', 15);                                                 /* X0025 */
+   memcpy(xTmpRmip, &server_addr, 15);                                         /* X0025 */
+   memset(&xTmpRmip[15], '\0', 1);                                             /* X0025 */
+   xTmpRmpt = atoi(server_port);                                               /* X0025 */
+
+      rtncode = ConnectToServer();
+ /*   if (rtncode == SOCKET_ERROR)                        */                   /* X0103 */
+      if (rtncode == FAIL)                                                     /* X0103 */
+      {
+        debug("Cannot connect to host socket, rtncode = %d.\n",rtncode);
+ /*     close(sock_listen);                               */                   /* X0071 */
+ /*     close(sock_server);                               */                   /* X0071 */
+
+        xTmpFctnm = "ConnectToServer()             ";                          /* X0025 */
+        xTmpOthif = "Connect to Server Failed      ";                          /* X0025 */
+        WrtCel();                                                              /* X0025 */
+
+ /*     return -1;                                        */                   /* X0071 */
+      }
+
+   xSttc = "A6";                                                               /* X0025 */
+   GenSttc();                                                                  /* X0025 */
+
+   memset(&xTmpLcip, ' ', 15);                                                 /* X0025 */
+   memcpy(xTmpLcip, &xlocal_addr, 15);                                         /* X0025 */
+   memset(&xTmpLcip[15], '\0', 1);                                             /* X0025 */
+   xTmpLcpt = 0;                                                               /* X0025 */
+   memset(xTmpRmip, ' ', 15);                                                  /* X0025 */
+   memset(&xTmpRmip[15], '\0', 1);                                             /* X0025 */
+   xTmpRmpt = 0;                                                               /* X0025 */
+
+   /* Start a loop that does a select() on a list of sockets in a
+      variable of type fd_set and returns in that same variable a subset
+      of what you sent. This subset contains only the list of sockets
+      ready for read. Note: At this point we are sending a read set
+      although write and exception sets can be sent too.                 */
+   while(1)
+   {
+      /* removes all descriptors from the read_set set */
+      FD_ZERO((void*)&read_set);
+      /* add the descriptors from the active socket list to read_set */
+      max_socket_nbr = 0;
+      for(i = 0; i < nbr_connected; i++)
+      {
+         if(socket_list[i] >= max_socket_nbr)
+            max_socket_nbr = socket_list[i];
+         FD_SET(socket_list[i], &read_set);
+      }
+      max_socket_nbr++;
+      debug("--- Starting to select ---\n");
+      /* select() - functions to wait or sleep(wait time) and wakes
+                    up when an input is available from any of the
+                    connected socket listed in the &read_set
+         max_descriptor  - descriptors are numbered from 0; so the
+                           max no of descriptors is 1 greater than
+                           the largest descriptor no to be tested.
+         read_set        - a pointer to a set of descriptors that
+                           should be checked if they are ready for
+                           reading. On return, only those descriptors
+                           ready to be read are in the &read_set list.
+                           NULL if the list to read is empty.
+         write_set       - a pointer to a set of descriptors that
+                           should be checked if they are ready for
+                           writing. NULL if there is no descriptor
+                           to be tested for writing.
+         exception_set   - a pointer to a set of descriptors that
+                           should be checked for pending exception
+                           events. NULL if there is no descriptor
+                           to be tested for an exception event.
+         wait_time       - a pointer to a time structure which
+                           specifies the max time to wait for a least
+                           one of the selection criteria to be met.
+                           A value of 0 means immediately. NULL means
+                           wait indefinetely.                         */
+      errno = 0;
+      rtncode = select(max_socket_nbr, &read_set, NULL, NULL, NULL);
+      if (rtncode == SOCKET_ERROR)
+      {
+         debug("Select function failed, rtncode = %d.\n", rtncode);
+         debug("Accept failed with error %i\n", errno);              /*A0031*/
+
+         xTmpFctnm = "Select()                      ";                         /* X0025 */
+         xTmpOthif = "Select Function Failed        ";                         /* X0025 */
+         WrtCel();                                                             /* X0025 */
+
+      }
+      /* rtncode means the total no of descriptor in all sets that met
+         the selection criteria                                        */
+      else if(rtncode > 0)
+      {
+         debug("--- Select Succeeded ---\n");
+         /* FD_ISSET - returns a nonzero value if the descriptor
+                       sock_listen is returned in the &read_set
+                       in the select() function; otherwise it
+                       returns a zero value.
+            If listening socket is in the read set(request for
+            connection), accept the new connection.              */
+         if(FD_ISSET(sock_listen, &read_set))
+         {
+         /* AcceptNewConnection();   */
+            if (!AcceptNewConnection())
+            {
+               debug("TCP/IP ended.......");
+               memcpy((void*)&data_map.SKTHEAD, "*DOWN", 5);
+               /* send shutdown to internal socket queue */
+            /* QSNDDTAQ(dtqnam,dtqlib, sizeof(data_map), &data_map); */        /* X0030 */
+               debug("TCP/IP ended.......");
+               break;
+            }
+         }
+         /* The read_set will also contain other descriptor values.
+            These descriptor values identify other Connected Sockets
+            who has data to send to us. We check from the latest
+            connected socket for any data to receive to maintain the
+            integrity of our search. We dont check the listening
+            socket again by skiping index 0.                         */
+         for(i = nbr_connected - 1; i > 0; i--)
+         {
+            /* if this socket is in the read set, receive message from it */
+            if(FD_ISSET(socket_list[i], &read_set))
+            {
+/*A0029               if(!ReceiveAMessage(socket_list[i]))   */
+               if(!ReceiveAMessage(socket_list[i], i))    /*A0029*/
+               {
+                  /* If error on receiving data, close the socket */
+                  CloseSocket(i);
+               }
+               else
+               {
+                  /* Initialize variable before used */                           /* X0010 */
+                  memset(&szResult, ' ', sizeof(szResult));                       /* X0010 */
+                  memset(&szTemp, ' ', sizeof(szTemp));                           /* X0010 */
+
+                  /* Receive incoming message from external (not complete msg)    /* X0010 */
+                  if ((instr(from_ext,sMsgHdr,30,5) >= 0) || (Extern_conn == 1))  /* X0010 */
+                  {
+                     debug("Received request from external .\n");                 /* X0010 */
+
+                  if(Extern_conn == 1)      /* Not Complete DSP Message */        /* X0010 */
+                  {                                                               /* X0010 */
+                     nMsgLen = nMsgLen + 33 + 213;  /* Length of whole message */ /* X0010 */
+                     memcpy(szResult, sRqstBuff, 4);  /* move the msg length to  first 4 digit */
+                     memset(&szResult[4096], '\0', 1);                         /* X0025 */
+
+                     /* convert message from ASCII to EBCDIC */
+                     if(strcmp(Cvrt_Msg , "Y") == 0)                              /* X0010 */
+                     {                                                            /* X0010 */
+                       convertASCII(szTemp, &sRqstBuff[246], nMsgLen-246);        /* X0010 */
+                       memmove(&szResult[246], szTemp, nMsgLen-246);              /* X0010 */
+                     }                                                            /* X0010 */
+                     else                                                         /* X0010 */
+                     {                                                            /* X0010 */
+                       memmove(&szResult[246], &sRqstBuff[246], nMsgLen-246);     /* X0010 */
+                     }                                                            /* X0010 */
+
+                     /* put the data into the external data structure */          /* X0010 */
+                     memcpy((void*)&data_map, szResult, nMsgLen);                 /* X0010 */
+                     memcpy((void*)&data_map.SKTHEAD, from_ext, 5);               /* X0010 */
+                  }                                                               /* X0010 */
+                  else        /* Complete DSP Message */                          /* X0010 */
+                  {                                                               /* X0010 */
+                     /* put the data into the external data structure */          /* X0010 */
+                     memcpy((void*)&data_map, sRqstBuff, nMsgLen);                /* X0010 */
+                  }  /* End for complete DSP message */                           /* X0010 */
+                                                                                  /* X0010 */
+                     /* put the socket descriptor into message header portion */          /* X0010 */
+                     QXXITOP((unsigned char*)&data_map.SKTSKNB , 9, 0, socket_list[i]);   /* X0010 */
+                     QXXITOP((unsigned char*)&data_map.SKTPORT , 5, 0, listen_port);      /* X0010 */
+                                                                                          /* X0010 */
+                     /*A0031 Set comm id to header file */                                /* X0010 */
+                     memset(&dsphdr, ' ', sizeof(dsphdr));                        /* X0010 */
+                     memcpy((void*)&dsphdr, &data_map.SKTDATA, sizeof(dsphdr));   /* X0010 */
+                     memcpy((void*)&dsphdr.I13XID[10], &CommId, 10);              /* X0010 */
+
+                     if(Extern_conn == 1)      /* Not Complete DSP Message */     /* X0010 */
+                     {                                                            /* X0010 */
+                       memset((void*)&dsphdr.I13HLEN, '0', 4);                    /* X0010 */
+                       memset((void*)&dsphdr.I13MLEN, '0', 6);                    /* X0010 */
+                       memset((void*)&dsphdr.I13VERS, '0', 4);                    /* X0010 */
+                       memset((void*)&dsphdr.I13BIN, '0', 11);                    /* X0010 */
+                       memset((void*)&dsphdr.I13NODE, '0', 2);                    /* X0010 */
+                       memset((void*)&dsphdr.I13TMNO, '0', 4);                    /* X0010 */
+                       memset((void*)&dsphdr.I13NREC, '0', 4);                    /* X0010 */
+                       memset((void*)&dsphdr.I13NERR, '0', 4);                    /* X0010 */
+                     }                                                            /* X0010 */
+
+                     memcpy((void*)&data_map.SKTDATA, &dsphdr, sizeof(dsphdr));   /* X0010 */
+
+                     /*A0029 Put clients' IP address (from API) into message*/
+                     memset(data_map.SKTDEVN, ' ', sizeof(data_map.SKTDEVN));     /* X0010 */
+                     memcpy((void*)&data_map.SKTDEVN, sClientArr[i].IPAddr, 15);  /* X0010 */
+
+                     /*A0029 Inform PM of the connection status */
+                     if(sClientArr[i].Logon == 1)                                /*A0029*/
+                     {                                                           /*A0029*/
+                      /* A0029 Authenticated connection         */
+                      if(sClientArr[i].PwdVfy == 1)                              /*A0029*/
+                      {                                                          /*A0029*/
+                        memcpy((void*)&data_map.SKTFILL, "2", 1);                /*A0029*/
+                      }                                                          /*A0029*/
+                      else                                                       /*A0029*/
+                      {                                                          /*A0029*/
+                        memcpy((void*)&data_map.SKTFILL, "1", 1);                /*A0029*/
+                      }                                                          /*A0029*/
+                     }                                                           /*A0029*/
+                     else                                                        /*A0029*/
+                     {                                                           /*A0029*/
+                     memcpy((void*)&data_map.SKTFILL, "0", 1);                   /*A0029*/
+                     }                                                           /*A0029*/
+
+                     if(Extern_conn == 1)      /* Not Complete DSP Message */        /* X0010 */
+                     {                                                         /* X0025 */
+                        memcpy((void*)&sMsgHdr, from_ext, 5);                        /* X0010 */
+                        memset(&sMsgHdr[5], '\0', 1);                          /* X0025 */
+                     }                                                         /* X0025 */
+
+                     xSttc = "A6";                                             /* X0025 */
+                     GenSttc();                                                /* X0025 */
+
+                     /* Search route name/lib for routing */
+                     SearchRoute();
+
+                     if(strcmp(QFOUND, "1") == 0)
+                     {
+                       /* send received data to dataq */
+                        QSNDDTAQ(QRNAMI, QRLIBI, nMsgLen, &data_map);
+                        if(strcmp(trace_sts, "1") == 0)
+                           DoSendTrace();
+                     }
+                     else
+                     {
+                        debug("Route name not found for this input message......\n");
+
+                        xTmpFctnm = "Select()                      ";          /* X0025 */
+                        xTmpOthif = "Select Function Failed        ";          /* X0025 */
+                        WrtCel();                                              /* X0025 */
+
+                     }
+                  }
+                  /* Reply message from internal client module */
+              /*  else if(strcmp(sMsgHdr, from_int) == 0)   */       /*yhh*/
+                  else if(strncmp(sMsgHdr, from_int,5 ) == 0)        /*yhh*/
+                  {
+                     char RtnConn[2];                                          /*A0029*/
+                     int    idx;                                               /*A0029*/
+
+                     xSttc = "A7";                                             /* X0025 */
+                     GenSttc();                                                /* X0025 */
+
+                     debug("Send reply to external.\n");
+
+               /*C0001*/
+                     /* Initialise the data structure */
+                     memset(&data_map, ' ', sizeof(data_map));
+                     memset(&sSendBuff, ' ', sizeof(sSendBuff));
+               /*C0001*/
+
+                     memcpy((void*)&data_map, sRqstBuff, nMsgLen);                    /* X0010 */
+
+                  /* put the data into the mapped data structure */                   /* X0010 */
+                  if(strcmp(Comp_Msg, "N") == 0 )    /* Not Complete DSP Message */   /* X0010 */
+                  {                                                                   /* X0010 */
+                     nMsgLen = nMsgLen - 213 - 33;                                    /* X0010 */
+                     data_map1.MSGLEN = nMsgLen;                                      /* X0010 */
+                     nMsgLen = nMsgLen + 2;                                           /* X0010 */
+                                                                                      /* X0010 */
+                     /* convert message from ASCII to EBCDIC */                       /* X0010 */
+                     if(strcmp(Cvrt_Msg , "Y") == 0)                                  /* X0010 */
+                     {                                                                /* X0010 */
+                     convertEBCDIC(szTemp, &sRqstBuff[246], nMsgLen-2);               /* X0010 */
+                     memmove((void*)&data_map1.MSGDETAIL, szTemp, nMsgLen-2);         /* X0010 */
+                     }                                                                /* X0010 */
+                     else                                                             /* X0010 */
+                     {                                                                /* X0010 */
+                     memmove((void*)&data_map1.MSGDETAIL, &sRqstBuff[246], nMsgLen-2);/* X0010 */
+                     }                                                                /* X0010 */
+                   /* copy message from request buffer to send buffer  */             /* X0010 */
+                   memcpy(&sSendBuff[0],(void*)&data_map1, nMsgLen);                  /* X0010 */
+                   memset(&sSendBuff[4096], '\0', 1);                          /* X0025 */
+                  }                                                                   /* X0010 */
+
+                  else    /* Complete DSP Message */                                  /* X0010 */
+                  {                                                                   /* X0010 */
+                  /* copy message from request buffer to send buffer  */              /* X0010 */
+                   memcpy(sSendBuff, sRqstBuff, nMsgLen);                             /* X0010 */
+                   memset(&sSendBuff[4096], '\0', 1);                          /* X0025 */
+                  }                                                                   /* X0010 */
+
+                     /* get destination socket descriptor */
+               /*    sock_dest = QXXZTOI((unsigned char*)&data_map.SKTSKNB , 9, 0);   */
+                     sock_dest = sock_server;
+
+
+                     /* put in a loop to make sure it all gets sent */
+                     nCounter = 0;
+		                   nBufferLen = nMsgLen;
+		                   while(nCounter < nMsgLen)
+		                   {
+/*X0052 - Setup the select function */
+               FD_ZERO((void*)&exception_set);                                           /*X0052*/
+               FD_SET(sock_dest, &exception_set);                                        /*X0052*/
+               errno = 0;                                                                /*X0052*/
+               rtncode = select(2, NULL, NULL, &exception_set, &wait_time);              /*X0052*/
+               if (rtncode == SOCKET_ERROR)                                              /*X0052*/
+               {                                                                         /*X0052*/
+                  debug("Select function failed, rtncode = %d.\n", rtncode);             /*X0052*/
+                  debug("Select failed with error %i\n", errno);                         /*X0052*/
+                  xTmpFctnm = "Select()                      ";                          /*X0052*/
+                  xTmpOthif = "Select Function Failed        ";                          /*X0052*/
+                  WrtCel();                                                              /*X0052*/
+               }                                                                         /*X0052*/
+               else                                                                      /*X0052*/
+               {                                                                         /*X0052*/
+                  debug("Select function successful\n");                                 /*X0052*/
+                  if(FD_ISSET(sock_dest, &exception_set))                                /*X0052*/
+                  {                                                                      /*X0052*/
+                    debug("Cannot write 1\n");                                           /*X0052*/
+                    xTmpFctnm = "Select(exception_set)         ";                        /*X0052*/
+                    xTmpOthif = "Socket Exception Exist        ";                        /*X0052*/
+                    WrtCel();                                                            /*X0052*/
+                    close(sock_dest);                                                    /*X0052*/
+              /*    if (!ConnectToServer())                          */       /*X0052*/  /* X0103 */
+                    rtncode = ConnectToServer();                                         /* X0103 */
+                    if (rtncode == FAIL)                                                 /* X0103 */
+                        break;                                                           /*X0052*/
+              /*    debug("Can write 1 after connection\n");         */                  /*X0052*/
+                  }                                                                      /*X0052*/
+                  else                                                                   /*X0052*/
+                    debug("Can write 1\n");                                              /*X0052*/
+               }                                                                         /*X0052*/
+
+               xSttc = "A8";                                                             /*X0052*/
+               GenSttc();                                                                /*X0052*/
+
+              errno = 0;                                                                 /*X0052*/
+                        /* send() - used to send data thru a connected
+                                    socket.
+                           socket_descriptor - the socket descriptor
+                                               to be written to.
+                           buffer - the pointer to the buffer in which
+                                    the data to be written is stored.
+                           flags - a flag value controls the transmision
+                                   of the data.                          */
+                        rtncode = send(sock_dest, &sSendBuff[nCounter], nBufferLen, 0);
+                        if(rtncode == SOCKET_ERROR)
+                        {
+                           debug("Send function failed on to socket %d.\n", sock_dest);
+
+                           xTmpFctnm = "Send()                        ";       /* X0025 */
+                           xTmpOthif = "Send Function Failed          ";       /* X0025 */
+                           WrtCel();                                           /* X0025 */
+
+                   /*      if (!ConnectToServer())                   */                  /* X0103 */
+                           rtncode = ConnectToServer();                                  /* X0103 */
+                           if (rtncode == FAIL)                                          /* X0103 */
+                              break;
+                        }
+                        else
+                        {
+                           nCounter += rtncode;
+                           nBufferLen -= rtncode;
+                           debug("Sent %d bytes to socket %d.\n", rtncode, sock_dest);
+                        }
+                     } /* nCounter < nMsgLen */
+                   memset(&RtnConn, ' ', 2);                                   /*A0029*/
+                   memcpy(RtnConn, &data_map.SKTFILL, 1);                      /*A0029*/
+                   memset(&RtnConn[1], '\0', 1);                               /*A0029*/
+                   for(idx=nbr_connected;idx>0;idx--)                          /*A0029*/
+                   {                                                           /*A0029*/
+                     if(sClientArr[idx].SesNo == sock_dest)                    /*A0029*/
+                       break;                                                  /*A0029*/
+                   }                                                           /*A0029*/
+                   if(strcmp(RtnConn,"V") == 0)                                /*A0029*/
+                   {                                                           /*A0029*/
+                    sClientArr[idx].PwdVfy = 1;                                /*A0029*/
+                   }                                                           /*A0029*/
+                   if(strcmp(RtnConn,"X") == 0)                                /*A0029*/
+                   {                                                           /*A0029*/
+                    CloseSocket(idx);                                          /*A0029*/
+                   }                                                           /*A0029*/
+                  }
+                  /* System command request */
+                  else if(strcmp(sMsgHdr, "*SYSC") == 0)
+                  {
+
+                     /* put the data into the mapped data structure */
+                     memcpy((void*)&data_map, sRqstBuff, nMsgLen);
+
+                     memcpy(&xCommand, (void*)&data_map.SKTDEVN, 8);
+                     memset(&xCommand[8], '\0', 1);
+                     debug("System command request %s.....\n", xCommand);
+
+                     if(strcmp(xCommand, "*LOAD   ")  == 0)
+                     {
+                        DoLoadTable();
+                     }
+                     else if(strcmp(xCommand, "*TRACE  ")  == 0)
+                     {                                                         /* X0025 */
+                        memcpy(trace_sts, &data_map.SKTDATA[193], 1);
+                        memset(&trace_sts[1], '\0', 1);                        /* X0025 */
+                     }                                                         /* X0025 */
+                     else if(strcmp(xCommand, "*DOWN   ")  == 0)
+                        bCloseall = TRUE;
+                  }
+                  /* set on the flag to down all socket */
+                  else if(strcmp(sMsgHdr, "*DOWN") == 0)
+                     bCloseall = TRUE;
+               } /* receive a message successfully */
+            } /* is socket in the read set */
+         } /* for all connected clients, do the above */
+      } /* select() was successful */
+      /* If an error occured while receiving data, exit loop */
+      if(bCloseall == TRUE)
+         break;
+   } /* while(1) */
+   debug("--- Closing Sockets ---\n");
+
+   /* Close down all connected sockets */
+   CloseAllConnectedSockets();
+
+   /* Close down the listening socket */
+   rtncode = close(sock_listen);
+
+   debug("--- All Done! ---\n");
+   return 0;
+}
