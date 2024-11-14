@@ -79,6 +79,7 @@ char        pgm_name[11]      = "DSPO0002  ";
 char        new_hdr_to_ext[6] = "*SOKI";
 char        temp1[6];
 char        RqstBuff[4097];                                                    /* X0025 */
+char        xx[1];
 
 typedef u_int SOCKET;
 SOCKET sock_listen;                    /* listening socket */

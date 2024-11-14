@@ -126,6 +126,7 @@ char    szResult[4097];  /* X0010 */                                           /
 char    szTemp[4097];    /* X0010 */
 
 char    sMsgHdr[6];                                                            /* X0025 */
+char    ss1[1];
 
 #pragma mapinc("dsprc", "DSPSKTDS(DSPSKTDSR)", "both", "d", "union", "DSPRC")
 #include "dsprc"
